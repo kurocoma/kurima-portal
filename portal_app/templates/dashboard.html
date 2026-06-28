@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}ポータル - くりまポータルツール{% endblock %}
+{% block content %}
+<section class="section">
+  <div class="section-head">
+    <div>
+      <p class="eyebrow">Portal</p>
+      <h1>業務ポータル</h1>
+    </div>
+    <a class="button primary" href="/inventory">在庫明細確認</a>
+  </div>
+
+  <div class="status-panel {% if status.ok %}ok{% else %}error{% endif %}">
+    <h2>実行環境</h2>
+    {% if status.ok %}
+      <dl class="meta-grid">
+        <dt>ポータルルート</dt>
+        <dd>{{ status.portal_root }}</dd>
+        <dt>商品マスタ</dt>
+        <dd>{{ status.master_book }}</dd>
+        <dt>受注明細CSV</dt>
+        <dd>{{ status.order_csv_dir }}</dd>
+      </dl>
+    {% else %}
+      <p>{{ status.error }}</p>
+      <ul class="compact-list">
+        {% for candidate in status.candidates %}
+          <li>{{ candidate }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+  </div>
+</section>
+
+<section class="section">
+  <h2>機能</h2>
+  <div class="tool-grid">
+    <article class="tool-card">
+      <div>
+        <h3>在庫明細確認</h3>
+        <p>Next Engine 受注明細CSVと商品管理シートから、通常商品と選べるセットの発注確認リストを作成します。</p>
+      </div>
+      <a class="button" href="/inventory">開く</a>
+    </article>
+    <article class="tool-card">
+      <div>
+        <h3>ヤマト伝票</h3>
+        <p>Next Engine のヤマト用CSVを確認し、B2取込用の完成データCSVを作成します。</p>
+      </div>
+      <a class="button" href="/yamato">開く</a>
+    </article>
+    <article class="tool-card">
+      <div>
+        <h3>クリックポスト</h3>
+        <p>Next Engine の購入者データと商品情報データから clickpostimport.csv を作成します。</p>
+      </div>
+      <a class="button" href="/clickpost">開く</a>
+    </article>
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}在庫明細確認 - くりまポータルツール{% endblock %}
+{% block content %}
+<section class="section">
+  <div class="section-head">
+    <div>
+      <p class="eyebrow">Inventory</p>
+      <h1>在庫明細確認</h1>
+    </div>
+    <div class="action-row">
+      <a class="button" href="/inventory">再読込</a>
+      <form class="inline-form" method="post" action="/inventory/fetch-next-engine">
+        <button class="button primary" type="submit">Next Engine取得</button>
+      </form>
+      {% if result %}
+        <a class="button" href="/inventory/download/normal">通常CSV</a>
+        <a class="button" href="/inventory/download/choice">選べるCSV</a>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if error %}
+    <div class="status-panel error">
+      <h2>エラー</h2>
+      <p>{{ error }}</p>
+    </div>
+  {% endif %}
+
+  {% if download_result %}
+    <div class="status-panel ok">
+      <h2>取得完了</h2>
+      <dl class="meta-grid">
+        <dt>保存ファイル</dt>
+        <dd>{{ download_result.downloaded_file }}</dd>
+        <dt>元ファイル名</dt>
+        <dd>{{ download_result.source_filename }}</dd>
+        <dt>保存日時</dt>
+        <dd>{{ download_result.saved_at.strftime("%Y-%m-%d %H:%M:%S") }}</dd>
+      </dl>
+    </div>
+  {% endif %}
+
+  {% if result %}
+    <div class="status-panel ok">
+      <h2>集計条件</h2>
+      <dl class="meta-grid">
+        <dt>生成日時</dt>
+        <dd>{{ result.generated_at.strftime("%Y-%m-%d %H:%M:%S") }}</dd>
+        <dt>CSV</dt>
+        <dd>{{ result.source_csv }}</dd>
+        <dt>CSV行数</dt>
+        <dd>{{ result.source_rows }}</dd>
+        <dt>商品管理シート</dt>
+        <dd>{{ result.paths.master_book }}</dd>
+      </dl>
+    </div>
+
+    {% if result.warnings %}
+      <div class="status-panel warn">
+        <h2>確認事項</h2>
+        <ul class="compact-list">
+          {% for warning in result.warnings %}
+            <li>{{ warning }}</li>
+          {% endfor %}
+        </ul>
+      </div>
+    {% endif %}
+
+    <section class="data-section">
+      <div class="table-head">
+        <h2>通常商品</h2>
+        <span class="badge">{{ result.normal_count }} 件</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>商品コード</th>
+              <th>商品名</th>
+              <th class="number">受注数</th>
+              <th class="number">引当数</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in result.normal_rows %}
+              <tr>
+                <td>{{ row["商品ｺｰﾄﾞ"] }}</td>
+                <td>{{ row["商品名"] }}</td>
+                <td class="number">{{ row["受注数"] }}</td>
+                <td class="number">{{ row["引当数"] }}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="4" class="empty">対象データなし</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="data-section">
+      <div class="table-head">
+        <h2>選べるセット</h2>
+        <span class="badge">{{ result.choice_count }} 件</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>商品名</th>
+              <th class="number">発注数量</th>
+              <th>備考</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in result.choice_rows %}
+              <tr>
+                <td>{{ row["商品名"] }}</td>
+                <td class="number">{{ row["発注数量"] }}</td>
+                <td>{{ row["備考"] }}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="3" class="empty">対象データなし</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  {% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}くりまポータルツール{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <a href="/">くりまポータルツール</a>
+      </div>
+      <nav class="nav">
+        <a href="/">ポータル</a>
+        <a href="/inventory">在庫明細確認</a>
+        <a href="/yamato">ヤマト伝票</a>
+        <a href="/clickpost">クリックポスト</a>
+      </nav>
+    </header>
+    <main class="page">
+      {% block content %}{% endblock %}
+    </main>
+  </body>
+</html>

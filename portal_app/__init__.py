@@ -1,0 +1,1 @@
+"""Kurima portal web application."""

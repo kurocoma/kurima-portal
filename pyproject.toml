@@ -1,0 +1,19 @@
+[project]
+name = "kurima-portal-tool"
+version = "0.1.0"
+description = "Local web portal for replacing PAD and Excel based inventory checks."
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi==0.115.6",
+  "uvicorn[standard]==0.34.0",
+  "jinja2==3.1.5",
+  "python-multipart==0.0.20",
+  "pandas==2.2.3",
+  "openpyxl==3.1.5",
+  "playwright==1.49.1",
+  "reportlab==4.2.5",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

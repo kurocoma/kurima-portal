@@ -1,0 +1,79 @@
+# Local runtimes and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local credentials and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.token
+*credential*
+*credentials*
+*secret*
+*secrets*
+!portal_app/services/credentials.py
+
+# Browser/session/auth state
+data/
+**/storage_state*.json
+**/*storage*.json
+**/*cookies*.json
+**/*session*.json
+
+# Runtime output, logs, screenshots, and temporary files
+logs/
+tmp/
+downloads/
+exports/
+*.log
+*.pid
+*.out
+*.err
+*.tmp
+*.bak
+*.backup
+
+# Generated business data and documents.
+# These can contain customer names, addresses, order data, tracking numbers,
+# invoice data, or payment/import results.
+*.csv
+*.tsv
+*.xlsx
+*.xlsm
+*.xls
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+
+# Evaluation and local agent artifacts
+validation/runs/
+validation/reference/
+.loop/
+.codex/
+GOAL.md
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/

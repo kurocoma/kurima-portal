@@ -1,0 +1,538 @@
+﻿{% extends "base.html" %}
+{% block title %}クリックポスト - くりまポータルツール{% endblock %}
+{% block content %}
+<section class="section">
+  <div class="section-head">
+    <div>
+      <p class="eyebrow">ClickPost</p>
+      <h1>クリックポスト</h1>
+    </div>
+    <div class="action-row">
+      <a class="button" href="/clickpost">再読み込み</a>
+      <form class="inline-form" method="post" action="/clickpost/create-csv-upload-check" data-progress-form data-progress-endpoint="/clickpost/create-csv-upload-check/start">
+        <button class="button" type="submit">CSV作成＋アップロード前チェック</button>
+      </form>
+    </div>
+  </div>
+
+  {% if error %}
+    <div class="status-panel error">
+      <h2>エラー</h2>
+      <p>{{ error }}</p>
+    </div>
+  {% endif %}
+
+  {% if message %}
+    <div class="status-panel ok">
+      <h2>作成完了</h2>
+      <p>{{ message }}</p>
+    </div>
+  {% endif %}
+
+  <div class="status-panel run-panel full-run-panel">
+    <h2>3処理まとめ実行</h2>
+    <form class="stack-form" method="post" action="/clickpost/full-run/start" data-progress-form data-progress-endpoint="/clickpost/full-run/start">
+      <div class="primary-run">
+        <button class="button danger run-button full-run-button" type="submit">NEダウンロード・レターパックPDF・クリックポスト本番処理</button>
+        {% if result %}
+          <span class="badge">ClickPost {{ result.target_rows }}件</span>
+        {% endif %}
+      </div>
+
+      <label class="check-field confirm-field">
+        <input type="checkbox" name="confirm_execute" required>
+        <span>3処理を連続実行し、クリックポストへ実インポート、決済、PDF保存、送り状番号CSV/Excel反映まで実行します</span>
+      </label>
+
+      <fieldset class="mode-toggle">
+        <legend>実行モード</legend>
+        <label>
+          <input type="radio" name="browser_mode" value="background">
+          <span>バックグラウンド</span>
+        </label>
+        <label>
+          <input type="radio" name="browser_mode" value="front" checked>
+          <span>フロント表示</span>
+        </label>
+      </fieldset>
+
+      <details class="settings-details">
+        <summary>詳細設定</summary>
+        <div class="settings-body">
+          <div class="form-grid clickpost-live-control-grid">
+            <label>
+              <span>slow_mo_ms</span>
+              <input type="number" name="slow_mo_ms" value="{{ slow_mo_ms|default(150) }}" min="0" step="50">
+            </label>
+            <label>
+              <span>最大決済件数</span>
+              <input type="number" name="max_payments" value="20" min="1" max="100" step="1">
+            </label>
+          </div>
+        </div>
+      </details>
+    </form>
+  </div>
+
+  <div class="status-panel run-panel">
+    <h2>NEダウンロード</h2>
+    <form class="stack-form" method="post" action="/clickpost/prepare" data-progress-form data-progress-endpoint="/clickpost/prepare/start">
+      <div class="primary-run">
+        <button class="button primary run-button" type="submit">NE取得 + CSV作成</button>
+        {% if result %}
+          <span class="badge">ClickPost {{ result.target_rows }}件</span>
+        {% endif %}
+      </div>
+
+      <fieldset class="mode-toggle">
+        <legend>実行モード</legend>
+        <label>
+          <input type="radio" name="browser_mode" value="background" {% if browser_mode|default("background") != "front" %}checked{% endif %}>
+          <span>バックグラウンド</span>
+        </label>
+        <label>
+          <input type="radio" name="browser_mode" value="front" {% if browser_mode|default("background") == "front" %}checked{% endif %}>
+          <span>フロント表示</span>
+        </label>
+      </fieldset>
+
+      <details class="settings-details">
+        <summary>詳細設定</summary>
+        <div class="settings-body">
+          <div class="form-grid clickpost-control-grid">
+            <label>
+              <span>slow_mo_ms</span>
+              <input type="number" name="slow_mo_ms" value="{{ slow_mo_ms|default(150) }}" min="0" step="50">
+            </label>
+          </div>
+        </div>
+      </details>
+    </form>
+  </div>
+
+  <div class="status-panel run-panel live-run-panel">
+    <h2>クリックポスト本番処理</h2>
+    <form class="stack-form" method="post" action="/clickpost/import-payment-print/start" data-progress-form data-progress-endpoint="/clickpost/import-payment-print/start">
+      <div class="primary-run">
+        <button class="button danger run-button" type="submit">CSVインポート・決済・送り状取得</button>
+        {% if result %}
+          <span class="badge">ClickPost {{ result.target_rows }}件</span>
+        {% endif %}
+      </div>
+
+      <label class="check-field confirm-field">
+        <input type="checkbox" name="confirm_execute" required>
+        <span>クリックポストへ実インポートし、決済、PDF保存、送り状番号CSV/Excel反映まで実行します</span>
+      </label>
+
+      <fieldset class="mode-toggle">
+        <legend>実行モード</legend>
+        <label>
+          <input type="radio" name="browser_mode" value="background">
+          <span>バックグラウンド</span>
+        </label>
+        <label>
+          <input type="radio" name="browser_mode" value="front" checked>
+          <span>フロント表示</span>
+        </label>
+      </fieldset>
+
+      <details class="settings-details">
+        <summary>詳細設定</summary>
+        <div class="settings-body">
+          <div class="form-grid clickpost-live-control-grid">
+            <label>
+              <span>slow_mo_ms</span>
+              <input type="number" name="slow_mo_ms" value="{{ slow_mo_ms|default(150) }}" min="0" step="50">
+            </label>
+            <label>
+              <span>最大決済件数</span>
+              <input type="number" name="max_payments" value="20" min="1" max="100" step="1">
+            </label>
+          </div>
+        </div>
+      </details>
+    </form>
+  </div>
+
+  <div class="status-panel run-panel">
+    <h2>レターパックPDF作成</h2>
+    <form class="stack-form" method="post" action="/clickpost/create-letterpack-pdf" data-progress-form data-progress-endpoint="/clickpost/create-letterpack-pdf/start">
+      <div class="primary-run">
+        <button class="button primary run-button" type="submit">レターパックPDF作成</button>
+        {% if letterpack_pdf_result and letterpack_pdf_result.output_pdf %}
+          <span class="badge">{{ letterpack_pdf_result.output_rows }}件</span>
+        {% endif %}
+      </div>
+    </form>
+  </div>
+
+  <div id="progress-panel" class="status-panel progress-panel" hidden>
+    <div class="progress-head">
+      <div>
+        <h2 id="progress-title">処理状況</h2>
+        <p id="progress-message" class="progress-message">開始待ちです。</p>
+      </div>
+      <span id="progress-status" class="badge">待機中</span>
+    </div>
+    <ol id="progress-steps" class="progress-steps"></ol>
+    <dl id="progress-result" class="meta-grid progress-result" hidden></dl>
+    <p id="progress-error" class="progress-error" hidden></p>
+  </div>
+
+  {% if prepare_result %}
+    <div class="status-panel {% if prepare_result.consistency_warnings %}warn{% else %}ok{% endif %}">
+      <h2>NE取得結果</h2>
+      <dl class="meta-grid">
+        <dt>実行モード</dt>
+        <dd>{% if browser_mode|default("background") == "front" %}フロント表示{% else %}バックグラウンド{% endif %}</dd>
+        <dt>購入者データ</dt>
+        <dd>{% if prepare_result.buyer and prepare_result.buyer.downloaded_file %}{{ prepare_result.buyer.downloaded_file }}{% else %}未取得{% endif %}</dd>
+        <dt>購入者対象</dt>
+        <dd>{% if prepare_result.buyer %}{{ prepare_result.buyer.snapshot.count }} 件{% else %}-{% endif %}</dd>
+        <dt>受注明細データ</dt>
+        <dd>{% if prepare_result.product and prepare_result.product.downloaded_file %}{{ prepare_result.product.downloaded_file }}{% else %}未取得{% endif %}</dd>
+        <dt>受注明細対象</dt>
+        <dd>{% if prepare_result.product %}{{ prepare_result.product.snapshot.count }} 件{% else %}-{% endif %}</dd>
+      </dl>
+      {% if prepare_result.consistency_warnings %}
+        <ul class="compact-list warning-list">
+          {% for warning in prepare_result.consistency_warnings %}
+            <li>{{ warning }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    </div>
+  {% endif %}
+
+  {% if upload_result %}
+    <div class="status-panel {% if upload_result.ready_for_payment %}ok{% else %}warn{% endif %}">
+      <h2>アップロード前チェック</h2>
+      <dl class="meta-grid">
+        <dt>CSV</dt>
+        <dd>{{ upload_result.csv_file }}</dd>
+        <dt>対象行数</dt>
+        <dd>{{ upload_result.target_rows }} 件</dd>
+        <dt>実アップロード</dt>
+        <dd>{% if upload_result.executed %}実行済み{% else %}未実行{% endif %}</dd>
+        <dt>状態</dt>
+        <dd>{{ upload_result.skipped_reason or "確認済み" }}</dd>
+      </dl>
+      {% if upload_result.warning_text %}
+        <p>{{ upload_result.warning_text }}</p>
+      {% endif %}
+    </div>
+  {% endif %}
+
+  {% if letterpack_pdf_result %}
+    <div class="status-panel {% if letterpack_pdf_result.output_pdf %}ok{% else %}warn{% endif %}">
+      <h2>レターパック宛名PDF</h2>
+      <dl class="meta-grid">
+        <dt>住所CSV</dt>
+        <dd>{{ letterpack_pdf_result.address_csv }}</dd>
+        <dt>PDF</dt>
+        <dd>{% if letterpack_pdf_result.output_pdf %}{{ letterpack_pdf_result.output_pdf }}{% else %}未作成{% endif %}</dd>
+        {% if letterpack_pdf_download_url %}
+          <dt>PDFダウンロード</dt>
+          <dd class="link-actions">
+            <a class="text-link" href="{{ letterpack_pdf_download_url }}">ダウンロード</a>
+            {% if letterpack_pdf_open_url %}
+              <a class="text-link" href="{{ letterpack_pdf_open_url }}" target="_blank" rel="noopener">ブラウザで開く</a>
+            {% endif %}
+          </dd>
+        {% endif %}
+        <dt>出力件数</dt>
+        <dd>{{ letterpack_pdf_result.output_rows }} 件</dd>
+        <dt>ページ数</dt>
+        <dd>{{ letterpack_pdf_result.page_count }}</dd>
+        <dt>監査ログ</dt>
+        <dd>{{ letterpack_pdf_result.audit_path }}</dd>
+      </dl>
+      {% if letterpack_pdf_result.warnings %}
+        <ul class="compact-list warning-list">
+          {% for warning in letterpack_pdf_result.warnings %}
+            <li>{{ warning }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    </div>
+  {% endif %}
+
+  {% if result %}
+    <div class="status-panel {% if result.warnings %}warn{% else %}ok{% endif %}">
+      <h2>変換概要</h2>
+      <dl class="meta-grid">
+        <dt>購入者CSV</dt>
+        <dd>{{ result.buyer_csv }}</dd>
+        <dt>商品情報CSV</dt>
+        <dd>{{ result.product_csv }}</dd>
+        <dt>購入者行数</dt>
+        <dd>{{ result.buyer_rows }}</dd>
+        <dt>商品情報行数</dt>
+        <dd>{{ result.product_rows }}</dd>
+        <dt>対象行数</dt>
+        <dd>{{ result.target_rows }}</dd>
+        <dt>出力CSV</dt>
+        <dd>{% if result.output_csv %}{{ result.output_csv }}{% else %}未作成{% endif %}</dd>
+        <dt>監査ログ</dt>
+        <dd>{% if result.audit_path %}{{ result.audit_path }}{% else %}未記録{% endif %}</dd>
+      </dl>
+      {% if result.warnings %}
+        <ul class="compact-list warning-list">
+          {% for warning in result.warnings %}
+            <li>{{ warning }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    </div>
+  {% endif %}
+</section>
+
+{% if result %}
+<section class="section data-section">
+  <div class="table-head">
+    <h2>CSVプレビュー</h2>
+    <span class="badge">{{ result.preview_rows|length }} 件表示</span>
+  </div>
+  <div class="table-wrap">
+    <table class="wide-table">
+      <thead>
+        <tr>
+          {% if result.preview_rows %}
+            {% for column in result.preview_rows[0].keys() %}
+              <th>{{ column }}</th>
+            {% endfor %}
+          {% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in result.preview_rows %}
+          <tr>
+            {% for value in row.values() %}
+              <td>{{ value }}</td>
+            {% endfor %}
+          </tr>
+        {% else %}
+          <tr>
+            <td class="empty">表示するデータがありません。</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+<script>
+(() => {
+  const panel = document.getElementById("progress-panel");
+  const title = document.getElementById("progress-title");
+  const message = document.getElementById("progress-message");
+  const statusBadge = document.getElementById("progress-status");
+  const stepsList = document.getElementById("progress-steps");
+  const resultList = document.getElementById("progress-result");
+  const errorBox = document.getElementById("progress-error");
+  const forms = document.querySelectorAll("[data-progress-form]");
+
+  const statusLabels = {
+    queued: "待機中",
+    running: "処理中",
+    completed: "完了",
+    failed: "エラー",
+    pending: "待機中"
+  };
+
+  const stepLabels = {
+    pending: "待機中",
+    running: "処理中",
+    completed: "完了",
+    failed: "エラー"
+  };
+
+  const flattenResult = (result) => {
+    const rows = [];
+    const push = (label, value) => {
+      if (value !== undefined && value !== null && value !== "" && !(Array.isArray(value) && value.length === 0)) {
+        rows.push([label, Array.isArray(value) ? value.join(" / ") : String(value)]);
+      }
+    };
+    if (result.conversion) {
+      push("出力CSV", result.conversion.output_csv);
+      push("CSV行数", result.conversion.output_rows);
+      push("CSV警告", result.conversion.warnings);
+    }
+    if (result.upload) {
+      push("チェック対象", `${result.upload.target_rows}件`);
+      push("実アップロード", result.upload.executed ? "実行済み" : "未実行");
+      push("状態", result.upload.skipped_reason || "確認済み");
+    }
+    if (result.prepare) {
+      push("購入者データ", result.prepare.buyer_file);
+      push("購入者対象", result.prepare.buyer_count == null ? null : `${result.prepare.buyer_count}件`);
+      push("受注明細データ", result.prepare.product_file);
+      push("受注明細対象", result.prepare.product_count == null ? null : `${result.prepare.product_count}件`);
+      push("クリックポストCSV", result.prepare.clickpost_csv);
+      push("クリックポスト件数", `${result.prepare.clickpost_rows}件`);
+      push("レターパック住所CSV", result.prepare.letterpack_csv);
+      push("レターパック件数", `${result.prepare.letterpack_rows}件`);
+      push("警告", result.prepare.warnings);
+    }
+    if (result.letterpack_pdf) {
+      push("住所CSV", result.letterpack_pdf.address_csv);
+      push("レターパックPDF", result.letterpack_pdf.output_pdf);
+      push("PDFダウンロード", result.letterpack_pdf.download_url);
+      push("PDFを開く", result.letterpack_pdf.open_url);
+      push("出力件数", `${result.letterpack_pdf.output_rows}件`);
+      push("ページ数", result.letterpack_pdf.page_count);
+      push("警告", result.letterpack_pdf.warnings);
+    }
+    if (result.import_payment_print) {
+      push("取込CSV", result.import_payment_print.csv_file);
+      push("取込対象", `${result.import_payment_print.target_rows}件`);
+      push("決済完了", `${result.import_payment_print.payments_completed}/${result.import_payment_print.payment_attempts}件`);
+      push("未決済残数", `${result.import_payment_print.remaining_payment_buttons}件`);
+      push("印字対象", `${result.import_payment_print.print_target_rows}件`);
+      push("保存PDF", result.import_payment_print.downloaded_pdf);
+      push("送り状番号CSV", result.import_payment_print.tracking_csv);
+      push("送り状番号件数", `${result.import_payment_print.tracking_rows}件`);
+      push("Excel反映", result.import_payment_print.workbook_updated ? "更新済み" : "未更新");
+      push("保存先", result.import_payment_print.download_dir);
+      push("状態", result.import_payment_print.skipped_reason);
+      push("警告", result.import_payment_print.warning_text);
+    }
+    return rows;
+  };
+
+  const renderResultValue = (dd, label, value) => {
+    const isClickPostDownload = value.startsWith("/clickpost/download/");
+    if (!isClickPostDownload) {
+      dd.textContent = value;
+      return;
+    }
+    const link = document.createElement("a");
+    link.className = "text-link";
+    link.href = value;
+    link.textContent = label === "PDFを開く" ? "ブラウザで開く" : "ダウンロード";
+    if (value.includes("disposition=inline")) {
+      link.target = "_blank";
+      link.rel = "noopener";
+    }
+    dd.appendChild(link);
+  };
+
+  const render = (job) => {
+    panel.hidden = false;
+    panel.classList.toggle("ok", job.status === "completed");
+    panel.classList.toggle("error", job.status === "failed");
+    panel.classList.toggle("warn", job.status === "running" || job.status === "queued");
+    title.textContent = job.title || "処理状況";
+    message.textContent = job.message || "";
+    statusBadge.textContent = statusLabels[job.status] || job.status;
+
+    stepsList.innerHTML = "";
+    for (const step of job.steps || []) {
+      const item = document.createElement("li");
+      item.className = `progress-step is-${step.status}`;
+      const dot = document.createElement("span");
+      dot.className = "step-dot";
+      const body = document.createElement("div");
+      const label = document.createElement("strong");
+      label.textContent = step.label;
+      const detail = document.createElement("small");
+      detail.textContent = `${stepLabels[step.status] || step.status}${step.detail ? " - " + step.detail : ""}`;
+      body.append(label, detail);
+      item.append(dot, body);
+      stepsList.appendChild(item);
+    }
+
+    const rows = flattenResult(job.result || {});
+    pushJobLogRows(rows, job);
+    resultList.innerHTML = "";
+    resultList.hidden = rows.length === 0;
+    for (const [label, value] of rows) {
+      const dt = document.createElement("dt");
+      const dd = document.createElement("dd");
+      dt.textContent = label;
+      renderResultValue(dd, label, value);
+      resultList.append(dt, dd);
+    }
+
+    errorBox.hidden = !job.error;
+    errorBox.textContent = job.error || "";
+  };
+
+  const pushJobLogRows = (rows, job) => {
+    if (job.log_dir) {
+      rows.push(["実行ログフォルダ", job.log_dir]);
+    }
+    if (job.log_events_path) {
+      rows.push(["イベントログ", job.log_events_path]);
+    }
+    if (job.log_summary_path) {
+      rows.push(["サマリログ", job.log_summary_path]);
+    }
+  };
+
+  const poll = async (jobId) => {
+    const response = await fetch(`/progress/${jobId}`, { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error("進捗を取得できませんでした。");
+    }
+    const job = await response.json();
+    render(job);
+    if (job.status === "completed" || job.status === "failed") {
+      for (const button of document.querySelectorAll("[data-progress-form] button")) {
+        button.disabled = false;
+      }
+      return;
+    }
+    setTimeout(() => poll(jobId).catch(showError), 1000);
+  };
+
+  const showError = (error) => {
+    panel.hidden = false;
+    panel.classList.add("error");
+    title.textContent = "処理状況";
+    message.textContent = "進捗表示でエラーが発生しました。";
+    statusBadge.textContent = "エラー";
+    errorBox.hidden = false;
+    errorBox.textContent = error.message || String(error);
+    for (const button of document.querySelectorAll("[data-progress-form] button")) {
+      button.disabled = false;
+    }
+  };
+
+  for (const form of forms) {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const endpoint = form.dataset.progressEndpoint;
+      if (!endpoint) {
+        form.submit();
+        return;
+      }
+      for (const button of document.querySelectorAll("[data-progress-form] button")) {
+        button.disabled = true;
+      }
+      render({
+        title: "処理状況",
+        status: "queued",
+        message: "ジョブを開始しています。",
+        steps: []
+      });
+      try {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          body: new FormData(form)
+        });
+        if (!response.ok) {
+          throw new Error("処理を開始できませんでした。");
+        }
+        const payload = await response.json();
+        await poll(payload.job_id);
+      } catch (error) {
+        showError(error);
+      }
+    });
+  }
+})();
+</script>
+{% endblock %}
