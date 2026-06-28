@@ -178,7 +178,7 @@ class NextEngineOrderDetailDownloader:
             kwargs["storage_state"] = str(STORAGE_STATE_PATH)
         return await browser.new_context(**kwargs)
 
-    async def _login(self, page: Page) -> None:
+    async def _login(self, page: Page, *, open_main: bool = False) -> None:
         await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
         await page.wait_for_timeout(1500)
         await self._dismiss_cookie_banner(page)
@@ -194,12 +194,16 @@ class NextEngineOrderDetailDownloader:
 
         await self._close_extra_news_pages(page)
         await self._remove_backdrops(page)
+        if open_main:
+            await self._open_main_function(page)
+        await self._close_extra_news_pages(page)
+
+    async def _open_main_function(self, page: Page) -> None:
         main_link = page.get_by_role("link", name="メイン機能")
         if await _is_visible(main_link, timeout=8000):
             await main_link.click()
             await page.wait_for_load_state("domcontentloaded", timeout=60000)
             await page.wait_for_timeout(2500)
-        await self._close_extra_news_pages(page)
 
     async def _dismiss_cookie_banner(self, page: Page) -> None:
         try:
@@ -254,8 +258,7 @@ class NextEngineOrderDetailDownloader:
                 continue
 
     async def _download_order_detail_csv(self, page: Page) -> NextEngineDownloadResult:
-        await page.goto(ORDER_DETAIL_URL, wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(2500)
+        await self._goto_order_detail_page(page)
 
         await self._open_search_panel(page)
         if self.order_status_options:
@@ -265,10 +268,10 @@ class NextEngineOrderDetailDownloader:
             await self._set_select_by_option_texts(page, self.payment_options)
 
         await self._click_search(page)
-        await page.wait_for_timeout(4000)
+        await self._wait_for_search_result_or_download(page)
         await self._remove_backdrops(page)
 
-        if await _is_visible(page.locator("text=結果はありませんでした"), timeout=1500):
+        if await self._is_no_results(page):
             raise RuntimeError("Next Engine の検索結果が0件でした。CSVは保存していません。")
 
         download = await self._click_download(page)
@@ -278,6 +281,38 @@ class NextEngineOrderDetailDownloader:
             downloaded_file=destination,
             source_filename=download.suggested_filename,
             saved_at=datetime.now(),
+        )
+
+    async def _goto_order_detail_page(self, page: Page) -> None:
+        last_error = ""
+        last_screenshot: Path | None = None
+        last_html: Path | None = None
+        for attempt in range(1, 4):
+            try:
+                await page.goto(ORDER_DETAIL_URL, wait_until="domcontentloaded", timeout=60000)
+                await self._remove_backdrops(page)
+                await page.wait_for_selector("#jyuchu_dlg_open", timeout=30000)
+                return
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                if "base.next-engine.org" in page.url:
+                    try:
+                        await self._open_main_function(page)
+                    except Exception:
+                        pass
+                last_screenshot, last_html = await self._save_debug_artifacts(
+                    page,
+                    f"order_detail_page_not_ready_attempt_{attempt}",
+                )
+                if attempt < 3:
+                    await page.wait_for_timeout(1500)
+
+        title = await self._safe_page_title(page)
+        excerpt = await self._safe_page_excerpt(page)
+        raise RuntimeError(
+            "Next Engine の受注明細一覧を直接開けませんでした。"
+            f" url={page.url} title={title} last_error={last_error}"
+            f" screenshot={last_screenshot} html={last_html} body_excerpt={excerpt}"
         )
 
     async def _open_search_panel(self, page: Page) -> None:
@@ -325,9 +360,71 @@ class NextEngineOrderDetailDownloader:
             page.locator("a:has-text('ダウンロード')"),
             page.locator("button:has-text('ダウンロード')"),
         ]
-        async with page.expect_download(timeout=90000) as download_info:
-            await _click_first_visible(candidates, "ダウンロード")
-        return await download_info.value
+        last_error = ""
+        for attempt in range(1, 4):
+            try:
+                await self._prepare_next_engine_download_click(page)
+                async with page.expect_download(timeout=90000) as download_info:
+                    await _click_first_visible(candidates, "ダウンロード")
+                return await download_info.value
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                await self._save_debug_artifacts(page, f"download_click_failed_attempt_{attempt}")
+                if attempt < 3:
+                    await page.reload(wait_until="domcontentloaded", timeout=60000)
+                    await self._wait_for_download_link(page)
+
+        raise RuntimeError(f"Next Engine のCSVダウンロードを開始できませんでした。{last_error}")
+
+    async def _wait_for_search_result_or_download(self, page: Page) -> None:
+        try:
+            await page.wait_for_function(
+                """
+                () => {
+                  const body = document.body ? document.body.innerText : "";
+                  return Boolean(document.querySelector("#searchJyuchu_table_dl_lnk"))
+                    || body.includes("結果はありません")
+                    || body.includes("検索結果はありません");
+                }
+                """,
+                timeout=60000,
+            )
+        except PlaywrightTimeoutError as exc:
+            screenshot, html = await self._save_debug_artifacts(page, "search_results_missing")
+            title = await self._safe_page_title(page)
+            excerpt = await self._safe_page_excerpt(page)
+            raise RuntimeError(
+                "Next Engine の検索結果が表示されませんでした。"
+                f" url={page.url} title={title} screenshot={screenshot}"
+                f" html={html} body_excerpt={excerpt}"
+            ) from exc
+
+    async def _is_no_results(self, page: Page) -> bool:
+        return await page.evaluate(
+            """
+            () => {
+              const body = document.body ? document.body.innerText : "";
+              return body.includes("結果はありません") || body.includes("検索結果はありません");
+            }
+            """
+        )
+
+    async def _wait_for_download_link(self, page: Page) -> None:
+        try:
+            await page.wait_for_selector("#searchJyuchu_table_dl_lnk", timeout=30000)
+        except PlaywrightTimeoutError as exc:
+            screenshot, html = await self._save_debug_artifacts(page, "download_link_missing")
+            raise RuntimeError(
+                "Next Engine のダウンロードリンクが表示されませんでした。"
+                f" url={page.url} screenshot={screenshot} html={html}"
+            ) from exc
+
+    async def _prepare_next_engine_download_click(self, page: Page) -> None:
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+        await self._remove_backdrops(page)
 
     async def _set_select_by_option_texts(self, page: Page, option_texts: Iterable[str]) -> None:
         requested = list(option_texts)
@@ -364,19 +461,41 @@ class NextEngineOrderDetailDownloader:
         await page.evaluate(
             """
             () => {
-              document.querySelectorAll(".modal-backdrop, #cm-ov, #cc--main").forEach((element) => element.remove());
+              document.querySelectorAll(
+                ".modal-backdrop, #cm-ov, #cc--main, .bootbox, .popover, .tooltip"
+              ).forEach((element) => element.remove());
               document.body.classList.remove("modal-open");
             }
             """
         )
 
-    async def _save_debug_artifacts(self, page: Page, label: str) -> None:
+    async def _save_debug_artifacts(self, page: Page, label: str) -> tuple[Path | None, Path | None]:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_label = "".join(ch for ch in label if ch.isalnum() or ch in ("_", "-"))
-        screenshot_path = LOG_DIR / f"{timestamp}_{safe_label}.png"
-        html_path = LOG_DIR / f"{timestamp}_{safe_label}.html"
-        await page.screenshot(path=str(screenshot_path), full_page=True)
-        html_path.write_text(await page.content(), encoding="utf-8")
+        screenshot_path: Path | None = LOG_DIR / f"{timestamp}_{safe_label}.png"
+        html_path: Path | None = LOG_DIR / f"{timestamp}_{safe_label}.html"
+        try:
+            await page.screenshot(path=str(screenshot_path), full_page=True)
+        except Exception:
+            screenshot_path = None
+        try:
+            html_path.write_text(await page.content(), encoding="utf-8")
+        except Exception:
+            html_path = None
+        return screenshot_path, html_path
+
+    async def _safe_page_title(self, page: Page) -> str:
+        try:
+            return await page.title()
+        except Exception:
+            return ""
+
+    async def _safe_page_excerpt(self, page: Page) -> str:
+        try:
+            text = await page.locator("body").inner_text(timeout=3000)
+            return " ".join(text.split())[:500]
+        except Exception:
+            return ""
 
     def _next_data_path(self) -> Path:
         destination_dir = self.destination_dir or self.paths.order_csv_dir
