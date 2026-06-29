@@ -22,6 +22,7 @@ from portal_app.services.clickpost import (
     upload_clickpost_csv_sync,
 )
 from portal_app.services.inventory import analyze_latest_inventory, result_to_csv
+from portal_app.services.inventory_pdf import inventory_result_to_pdf
 from portal_app.services.letterpack_pdf import create_letterpack_label_pdf
 from portal_app.services.ne02_order_details import download_ne02_order_details_sync
 from portal_app.services.next_engine_downloader import download_next_engine_order_details
@@ -271,6 +272,34 @@ async def inventory_fetch_next_engine(request: Request):
             },
             status_code=500,
         )
+
+
+@app.get("/inventory/download/pdf")
+def inventory_download_pdf():
+    result = analyze_latest_inventory()
+    pdf_bytes = inventory_result_to_pdf(result)
+    filename = f"inventory_detail_{result.generated_at:%Y%m%d_%H%M%S}.pdf"
+    return Response(
+        pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/inventory/download/pdf/{kind}")
+def inventory_download_pdf_kind(kind: str):
+    if kind not in {"normal", "choice"}:
+        return PlainTextResponse("kind must be normal or choice", status_code=400)
+
+    result = analyze_latest_inventory()
+    pdf_bytes = inventory_result_to_pdf(result, "normal" if kind == "normal" else "choice")
+    filename_suffix = "normal" if kind == "normal" else "choice"
+    filename = f"inventory_{filename_suffix}_{result.generated_at:%Y%m%d_%H%M%S}.pdf"
+    return Response(
+        pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/inventory/download/{kind}")
