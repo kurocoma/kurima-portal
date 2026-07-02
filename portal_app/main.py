@@ -32,7 +32,7 @@ from portal_app.services.next_engine_downloader import (
     download_next_engine_order_details_sync,
 )
 from portal_app.services.next_engine_order_status import restore_next_engine_print_wait_batch_sync
-from portal_app.services.paths import candidate_portal_roots, find_portal_paths
+from portal_app.services.paths import candidate_portal_roots, find_portal_paths, latest_order_csv
 from portal_app.services.progress_jobs import progress_jobs, read_job_history
 from portal_app.services.shipment_confirmation import confirm_next_engine_shipment_sync
 from portal_app.services.takaesu_orders import (
@@ -267,6 +267,10 @@ def _letterpack_pdf_summary(result) -> dict[str, object]:
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request):
     status: dict[str, object]
+    # データ鮮度: 最新の受注明細CSVのファイル名と更新日時。
+    # 「いま画面に出ている集計はいつ時点のデータか」を見えるようにする。
+    # フォルダ未解決・CSVなしでも 500 にせず「未取得」表示にする。
+    freshness: dict[str, object] = {"ok": False}
     try:
         paths = find_portal_paths()
         status = {
@@ -275,6 +279,16 @@ def dashboard(request: Request):
             "master_book": paths.master_book,
             "order_csv_dir": paths.order_csv_dir,
         }
+        try:
+            latest_csv = latest_order_csv(paths.order_csv_dir)
+            updated_at = datetime.fromtimestamp(latest_csv.stat().st_mtime)
+            freshness = {
+                "ok": True,
+                "name": latest_csv.name,
+                "updated_at": updated_at.strftime("%Y-%m-%d %H:%M"),
+            }
+        except Exception:
+            pass
     except Exception as exc:
         status = {
             "ok": False,
@@ -287,6 +301,7 @@ def dashboard(request: Request):
         {
             "request": request,
             "status": status,
+            "freshness": freshness,
         },
     )
 
