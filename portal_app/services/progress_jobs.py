@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -8,10 +9,15 @@ from threading import Lock, Thread
 from typing import Callable
 from uuid import uuid4
 
-from portal_app.services.execution_logger import ExecutionLogger, exception_payload
+from portal_app.services.execution_logger import APP_ROOT, ExecutionLogger, exception_payload
 
 
 JobWorker = Callable[[str], None]
+
+# ジョブ完了/失敗の履歴を1行1JSONで追記する永続ファイル。
+# メモリ内の _jobs はプロセス終了で消えるため、「昨日の実行がどうなったか」を
+# サーバー再起動後も追えるようにする。logs/ は gitignore 済み。
+JOB_HISTORY_PATH = APP_ROOT / "logs" / "jobs" / "history.jsonl"
 
 
 def _ensure_subprocess_event_loop_policy() -> None:
@@ -46,6 +52,7 @@ class ProgressJob:
     status: str
     message: str
     steps: list[ProgressStep]
+    workflow: str = "progress"
     created_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     finished_at: str | None = None
@@ -80,6 +87,7 @@ class ProgressJobStore:
             status="queued",
             message="開始待ちです。",
             steps=[ProgressStep(key=key, label=label) for key, label in steps],
+            workflow=workflow,
             log_dir=log_paths["run_dir"],
             log_events_path=log_paths["events_path"],
             log_summary_path=log_paths["summary_path"],
@@ -128,6 +136,7 @@ class ProgressJobStore:
         snapshot = self.snapshot(job_id) or {}
         self._write_event(job_id, "job_completed", status="completed", detail=message, data=result or {})
         self._write_summary(job_id, snapshot)
+        self._append_history(job_id)
 
     def fail(self, job_id: str, error: str, *, error_detail: dict[str, object] | None = None) -> None:
         self._mutate(
@@ -147,6 +156,39 @@ class ProgressJobStore:
             level="error",
         )
         self._write_summary(job_id, snapshot)
+        self._append_history(job_id)
+
+    def _append_history(self, job_id: str) -> None:
+        """ジョブ終了時に logs/jobs/history.jsonl へ1行追記する。
+
+        履歴の書き込み失敗でジョブ本体の完了/失敗処理を壊さないよう、
+        例外は握りつぶす（履歴はベストエフォート）。
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+            record = {
+                "job_id": job.job_id,
+                "title": job.title,
+                "workflow": job.workflow,
+                "status": job.status,
+                "started_at": job.created_at,
+                "finished_at": job.finished_at,
+                "duration_sec": _duration_seconds(job.created_at, job.finished_at),
+                "error": job.error,
+                "steps": [
+                    {"key": step.key, "label": step.label, "status": step.status}
+                    for step in job.steps
+                ],
+                "log_events_path": job.log_events_path,
+            }
+        try:
+            JOB_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with JOB_HISTORY_PATH.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
 
     def snapshot(self, job_id: str) -> dict[str, object] | None:
         with self._lock:
@@ -207,6 +249,43 @@ class ProgressJobStore:
             logger = self._loggers.get(job_id)
         if logger is not None:
             logger.write_summary(summary)
+
+
+def _duration_seconds(started_at: str | None, finished_at: str | None) -> float | None:
+    if not started_at or not finished_at:
+        return None
+    try:
+        delta = datetime.fromisoformat(finished_at) - datetime.fromisoformat(started_at)
+    except ValueError:
+        return None
+    return round(delta.total_seconds(), 1)
+
+
+def read_job_history(limit: int = 200) -> list[dict[str, object]]:
+    """history.jsonl を新しい順に読み出す。
+
+    ファイルが無ければ空、壊れた行（不完全なJSON等）は無視する
+    （追記型JSONLの性質上、プロセス強制終了などで欠けた行が混ざり得るため）。
+    """
+    if not JOB_HISTORY_PATH.is_file():
+        return []
+    records: list[dict[str, object]] = []
+    try:
+        lines = JOB_HISTORY_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    records.reverse()
+    return records[:limit]
 
 
 progress_jobs = ProgressJobStore()

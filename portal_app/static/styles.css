@@ -1045,6 +1045,12 @@ button {
   color: var(--ok);
 }
 
+.tag-fail {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--error);
+}
+
 .cell-need {
   color: var(--warn);
   font-weight: 500;

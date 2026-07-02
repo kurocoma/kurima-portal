@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}実行履歴 - くりまポータルツール{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1 class="page-title">実行履歴</h1>
+  <p class="page-lead">バックグラウンドジョブの完了・失敗の履歴です（新しい順・最新200件）。サーバーを再起動しても残ります。</p>
+</div>
+
+<div class="tbl-wrap mt-16">
+  <div class="tbl-scroll">
+    <table class="tbl tbl-min-760">
+      <thead>
+        <tr>
+          <th>終了日時</th>
+          <th>ジョブ</th>
+          <th>結果</th>
+          <th>所要</th>
+          <th>エラー概要</th>
+          <th>ログ</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if rows %}
+          {% for row in rows %}
+          <tr>
+            <td class="mono">{{ row.finished_at }}</td>
+            <td>
+              {{ row.title }}
+              <div class="mono" style="font-size:11px;">{{ row.workflow }}</div>
+            </td>
+            <td>
+              {% if row.status == 'completed' %}
+                <span class="tag-auto">完了</span>
+              {% elif row.status == 'failed' %}
+                <span class="tag-fail">失敗</span>
+              {% else %}
+                <span class="badge">{{ row.status }}</span>
+              {% endif %}
+            </td>
+            <td class="num">{% if row.duration_sec is not none %}{{ row.duration_sec }} 秒{% else %}-{% endif %}</td>
+            <td>
+              {% if row.error %}
+                {{ row.error[:160] }}{% if row.error|length > 160 %}…{% endif %}
+              {% else %}
+                -
+              {% endif %}
+            </td>
+            <td>
+              {% if row.events_url %}
+                <a class="text-link" href="{{ row.events_url }}">詳細ログ</a>
+              {% else %}
+                -
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        {% else %}
+          <tr><td class="empty" colspan="6">実行履歴はまだありません。ジョブを実行すると、完了/失敗がここに記録されます。</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p class="mt-14" style="font-size:12.5px;color:var(--muted-2);">
+  エラーの詳細は <a class="text-link" href="/logs">ログ一覧</a> からも確認できます。
+</p>
+{% endblock %}

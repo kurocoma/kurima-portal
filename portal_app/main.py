@@ -32,7 +32,7 @@ from portal_app.services.next_engine_downloader import (
 )
 from portal_app.services.next_engine_order_status import restore_next_engine_print_wait_batch_sync
 from portal_app.services.paths import candidate_portal_roots, find_portal_paths
-from portal_app.services.progress_jobs import progress_jobs
+from portal_app.services.progress_jobs import progress_jobs, read_job_history
 from portal_app.services.shipment_confirmation import confirm_next_engine_shipment_sync
 from portal_app.services.takaesu_orders import (
     create_takaesu_order_sheet_csv,
@@ -48,6 +48,7 @@ from portal_app.services.yamato_conversion import (
 )
 
 APP_DIR = Path(__file__).resolve().parent
+LOGS_ROOT = APP_DIR.parent / "logs"
 
 app = FastAPI(title="くりまポータルツール")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
@@ -1742,6 +1743,44 @@ async def yamato_b2_import(request: Request):
             error=str(exc),
             status_code=500,
         )
+
+
+def _log_relpath(raw: str | None) -> str | None:
+    """絶対パスを logs/ 相対に変換する（/logs/view へのリンク用）。logs/ 外なら None。"""
+    if not raw:
+        return None
+    try:
+        return Path(raw).resolve().relative_to(LOGS_ROOT.resolve()).as_posix()
+    except (ValueError, OSError):
+        return None
+
+
+@app.get("/jobs", response_class=HTMLResponse)
+def jobs_history(request: Request):
+    # ジョブ実行履歴（logs/jobs/history.jsonl）を新しい順に一覧する。
+    # ファイル無し・壊れ行は read_job_history が吸収して空/スキップになる。
+    records = read_job_history(limit=200)
+    rows = []
+    for record in records:
+        events_rel = _log_relpath(record.get("log_events_path"))  # type: ignore[arg-type]
+        rows.append(
+            {
+                "finished_at": record.get("finished_at") or "-",
+                "title": record.get("title") or "-",
+                "workflow": record.get("workflow") or "-",
+                "status": record.get("status") or "-",
+                "duration_sec": record.get("duration_sec"),
+                "error": record.get("error"),
+                "events_url": f"/logs/view?path={quote(events_rel)}" if events_rel else None,
+            }
+        )
+    return templates.TemplateResponse(
+        "jobs.html",
+        {
+            "request": request,
+            "rows": rows,
+        },
+    )
 
 
 @app.get("/health")
