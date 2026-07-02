@@ -30,11 +30,14 @@ def _path_from_env(name: str) -> Path | None:
 def candidate_portal_roots() -> list[Path]:
     home = Path.home()
     one_drive = _path_from_env("OneDriveCommercial") or _path_from_env("OneDrive")
-    explicit = _path_from_env("PORTAL_ROOT")
 
     candidates: list[Path] = []
-    if explicit:
-        candidates.append(explicit)
+    # 環境変数の明示指定を最優先する（他PCではユーザー名・同期ルートが異なるため）。
+    # KURIMA_PORTAL_ROOT が新キー。PORTAL_ROOT は後方互換のため残す。
+    for env_name in ("KURIMA_PORTAL_ROOT", "PORTAL_ROOT"):
+        explicit = _path_from_env(env_name)
+        if explicit:
+            candidates.append(explicit)
 
     candidates.extend(
         [
@@ -71,19 +74,34 @@ def is_portal_root(path: Path) -> bool:
 
 
 def find_portal_paths() -> PortalPaths:
+    """ポータルの各パスを解決する。
+
+    環境変数（KURIMA_MASTER_BOOK / KURIMA_ORDER_CSV_DIR / KURIMA_TOOL_DIR）が
+    設定されていれば個別パスをそれで上書きし、未設定分はポータルルート
+    （KURIMA_PORTAL_ROOT / PORTAL_ROOT または既定候補の自動探索）からの
+    既定レイアウトで解決する。全キー未設定なら従来と同じ自動探索のみ
+    （後方互換。現PCでは無設定で動く）。
+    """
+    master_override = _path_from_env("KURIMA_MASTER_BOOK")
+    order_override = _path_from_env("KURIMA_ORDER_CSV_DIR")
+    tool_override = _path_from_env("KURIMA_TOOL_DIR")
+
     for root in candidate_portal_roots():
-        if is_portal_root(root):
+        master_book = master_override or root / MASTER_FILE_NAME
+        order_csv_dir = order_override or root.joinpath(*ORDER_RELATIVE_PARTS)
+        if root.is_dir() and master_book.is_file() and order_csv_dir.is_dir():
             return PortalPaths(
                 portal_root=root,
-                master_book=root / MASTER_FILE_NAME,
-                order_csv_dir=root.joinpath(*ORDER_RELATIVE_PARTS),
-                tool_dir=root.joinpath(*TOOL_RELATIVE_PARTS),
+                master_book=master_book,
+                order_csv_dir=order_csv_dir,
+                tool_dir=tool_override or root.joinpath(*TOOL_RELATIVE_PARTS),
             )
 
     checked = "\n".join(str(path) for path in candidate_portal_roots())
     raise FileNotFoundError(
         "くりまポータルの同期フォルダを検出できませんでした。"
-        "PORTAL_ROOT を設定するか、SharePoint ライブラリを同期してください。\n"
+        "KURIMA_PORTAL_ROOT（または PORTAL_ROOT）を設定するか、"
+        "SharePoint ライブラリを同期してください。\n"
         f"確認した候補:\n{checked}"
     )
 
