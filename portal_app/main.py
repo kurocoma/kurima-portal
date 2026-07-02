@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 
 import csv
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, quote
@@ -33,7 +35,7 @@ from portal_app.services.next_engine_downloader import (
 )
 from portal_app.services.next_engine_order_status import restore_next_engine_print_wait_batch_sync
 from portal_app.services.paths import candidate_portal_roots, find_portal_paths, latest_order_csv
-from portal_app.services.progress_jobs import progress_jobs, read_job_history
+from portal_app.services.progress_jobs import JobCancelled, progress_jobs, read_job_history
 from portal_app.services.shipment_confirmation import confirm_next_engine_shipment_sync
 from portal_app.services.takaesu_orders import (
     create_takaesu_order_sheet_csv,
@@ -41,7 +43,13 @@ from portal_app.services.takaesu_orders import (
     download_takaesu_order_details_sync,
     prepare_takaesu_order_workflow_sync,
 )
-from portal_app.services.yamato_b2_import import import_yamato_b2_csv, import_yamato_b2_csv_sync
+from portal_app.services import b2_chrome
+from portal_app.services.yamato_b2_import import (
+    import_yamato_b2_csv,
+    import_yamato_b2_csv_sync,
+    resolve_default_b2_csv,
+    run_b2_import_over_cdp_sync,
+)
 from portal_app.services.yamato_b2_workflow import prepare_yamato_b2_sync
 from portal_app.services.yamato_conversion import (
     create_ne_to_yamato_csv,
@@ -702,12 +710,19 @@ def _yamato_response(
             "message": message,
             "error": error,
             "defer_preview": defer_preview,
+            "b2_browser": b2_chrome.status(),
+            "b2_csv_path": _b2_csv_path_text(),
             "restore_order_nos_text": "\n".join(
                 _yamato_restore_order_numbers_from_prepare_result(prepare_result)
             ),
         },
         status_code=status_code,
     )
+
+
+def _b2_csv_path_text() -> str | None:
+    csv_path = resolve_default_b2_csv()
+    return str(csv_path) if csv_path else None
 
 
 @app.get("/yamato/preview", response_class=HTMLResponse)
@@ -797,6 +812,44 @@ def progress_status(job_id: str):
     if snapshot is None:
         return Response(status_code=404)
     return snapshot
+
+
+def _force_stop_job_browsers() -> None:
+    """実行中ジョブのブラウザを強制終了して自動操作を即時停止する。
+
+    - Playwright が起動したブラウザ（ms-playwright 配下の chrome.exe / headless_shell.exe）のみを
+      パスで絞って kill する。ユーザーが個人的に開いている Google Chrome（Program Files 配下）は殺さない。
+    - B2印刷/取込用の実Chrome（b2_chrome, 追跡PIDで管理）は close() で終了する。
+    ジョブは通常1件ずつ逐次実行のため、実行中ジョブのブラウザのみが対象になる。
+    """
+    try:
+        b2_chrome.close()
+    except Exception:
+        pass
+    if sys.platform != "win32":
+        return
+    ps = (
+        "Get-CimInstance Win32_Process | "
+        "Where-Object { $_.ExecutablePath -like '*ms-playwright*' -and "
+        "($_.Name -eq 'chrome.exe' -or $_.Name -eq 'headless_shell.exe') } | "
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+    )
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True,
+            timeout=15,
+        )
+    except Exception:
+        pass
+
+
+@app.post("/progress/{job_id}/cancel")
+async def progress_cancel(job_id: str):
+    # ①中止フラグを立て（実行中工程を記録）② 実行中ブラウザを強制終了して即時停止する。
+    where = progress_jobs.request_cancel(job_id)
+    await run_in_threadpool(_force_stop_job_browsers)
+    return {"cancelling": True, "stopped_at": where}
 
 
 @app.get("/clickpost/download/letterpack-pdf/{filename}")
@@ -1605,35 +1658,46 @@ async def yamato_run_selected_start(request: Request):
 
     steps: list[tuple[str, str]] = []
     if should_prepare:
-        steps.append(("prepare", "受注取得〜B2取込CSV作成"))
+        # 「どこで止まったか」を分かりやすくするため、受注取得を工程ごとに分割表示する。
+        steps.extend(
+            [
+                ("ne_fetch", "NEデータ取得"),
+                ("invoice", "納品書PDF取得"),
+                ("custom", "配送情報CSV取得"),
+                ("conversion", "住所補正・B2取込CSV作成"),
+            ]
+        )
     if do_b2:
         steps.append(("b2_import", "ヤマトB2へ取込"))
 
     def worker(job_id: str) -> None:
         current_result = None
         if should_prepare:
-            progress_jobs.update_step(job_id, "prepare", status="running")
-            try:
-                prepare_result = prepare_yamato_b2_sync(
-                    fetch_next_engine=selected["ne_order_download"],
-                    execute_downloads=selected["ne_order_download"],
-                    check_invoices=selected["ne_invoice_download"],
-                    execute_invoices=selected["ne_invoice_download"],
-                    verify_invoice_statuses=verify_invoice_statuses,
-                    check_custom_shipping=selected["ne_custom_data_import"],
-                    execute_custom_shipping=selected["ne_custom_data_import"],
-                    custom_shipping_order_numbers=order_numbers,
-                    write_conversion=selected["csv_create"],
-                    output_type="D_ALL",
-                    headed=headed,
-                    slow_mo_ms=slow_mo_ms,
-                    preview_limit=preview_limit,
-                )
-            except Exception:
-                progress_jobs.update_step(job_id, "prepare", status="failed")
-                raise
+            # prepare が各工程の running/completed/failed を progress で報告する
+            # → 失敗した工程だけが赤くなり、どこで止まったかが一目で分かる。
+            def _prep_progress(key: str, status: str, detail: str | None = None) -> None:
+                # 工程境界で中止要求をチェックし、要求されていれば安全に停止する（協調キャンセル）。
+                if progress_jobs.is_cancel_requested(job_id):
+                    raise JobCancelled()
+                progress_jobs.update_step(job_id, key, status=status, detail=detail)
+
+            prepare_result = prepare_yamato_b2_sync(
+                fetch_next_engine=selected["ne_order_download"],
+                execute_downloads=selected["ne_order_download"],
+                check_invoices=selected["ne_invoice_download"],
+                execute_invoices=selected["ne_invoice_download"],
+                verify_invoice_statuses=verify_invoice_statuses,
+                check_custom_shipping=selected["ne_custom_data_import"],
+                execute_custom_shipping=selected["ne_custom_data_import"],
+                custom_shipping_order_numbers=order_numbers,
+                write_conversion=selected["csv_create"],
+                output_type="D_ALL",
+                headed=headed,
+                slow_mo_ms=slow_mo_ms,
+                preview_limit=preview_limit,
+                progress=_prep_progress,
+            )
             current_result = prepare_result.conversion
-            progress_jobs.update_step(job_id, "prepare", status="completed")
 
         b2_result = None
         if do_b2:
@@ -1783,6 +1847,146 @@ async def yamato_b2_import(request: Request):
             error=str(exc),
             status_code=500,
         )
+
+
+def _wait_for_cdp(endpoint: str | None, *, timeout: float = 12.0) -> bool:
+    """Chromeのリモートデバッグポートが応答するまで待つ（CDP接続前）。"""
+    if not endpoint:
+        return False
+    import time
+    import urllib.request
+
+    url = endpoint.rstrip("/") + "/json/version"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=2) as resp:
+                if resp.status == 200:
+                    return True
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return False
+
+
+def _b2_outcome_summary(outcome: dict) -> dict[str, object]:
+    warnings = list(outcome.get("warnings") or ())
+    return {
+        "file_selected": bool(outcome.get("file_selected")),
+        "import_executed": bool(outcome.get("import_executed")),
+        "skipped_reason": outcome.get("skipped_reason"),
+        "warnings": warnings[:3],
+    }
+
+
+@app.post("/yamato/b2-open/start")
+async def yamato_b2_open_start(request: Request):
+    # ⑥「B2取込ブラウザを開く」の非同期版。実Chromeを独立起動し（印刷まで開いたまま）、
+    # automate=on のときのみ CDP接続で取込まで自動を試みる（縮退時は手動フォールバック）。
+    form = await _read_form(request)
+    automate = _form_bool(form, "automate")
+    csv_file_raw = form.get("csv_file", "").strip()
+    csv_path = Path(csv_file_raw) if csv_file_raw else resolve_default_b2_csv()
+    if csv_path is None or not Path(csv_path).is_file():
+        return PlainTextResponse("先にヤマト用CSVを作成してください。", status_code=400)
+    csv_path = Path(csv_path)
+
+    steps: list[tuple[str, str]] = [("open", "B2ブラウザを開く")]
+    if automate:
+        steps.append(("b2_import", "B2へ取込（自動を試行）"))
+
+    def worker(job_id: str) -> None:
+        progress_jobs.update_step(job_id, "open", status="running")
+        try:
+            state = b2_chrome.launch(csv_path=csv_path, enable_cdp=automate)
+        except Exception:
+            progress_jobs.update_step(job_id, "open", status="failed")
+            raise
+        progress_jobs.update_step(job_id, "open", status="completed")
+
+        if not automate:
+            progress_jobs.finish(
+                job_id,
+                message="B2ブラウザを開きました。取込・印刷を進めてください。",
+                result={"mode": "manual", "pid": state.get("pid")},
+            )
+            return
+
+        progress_jobs.update_step(job_id, "b2_import", status="running")
+        endpoint = state.get("cdp_endpoint")
+        if not _wait_for_cdp(endpoint):
+            progress_jobs.update_step(job_id, "b2_import", status="failed", detail="cdp_not_ready")
+            progress_jobs.finish(
+                job_id,
+                message="自動化に接続できませんでした。開いているB2ブラウザで手動で取込・印刷してください。",
+                result={"mode": "auto_failed", "reason": "cdp_not_ready"},
+            )
+            return
+        try:
+            outcome = run_b2_import_over_cdp_sync(
+                endpoint,
+                csv_file=csv_path,
+                execute_import=True,
+                confirm_import=True,
+            )
+        except Exception as exc:
+            # 自動化が落ちても実Chromeは開いたまま＝手動で継続できる。
+            progress_jobs.update_step(job_id, "b2_import", status="failed", detail=str(exc))
+            progress_jobs.finish(
+                job_id,
+                message="自動取込は失敗しました。開いているB2ブラウザで手動で取込・印刷してください。",
+                result={"mode": "auto_failed", "error": str(exc)},
+            )
+            return
+
+        if outcome.get("import_executed"):
+            progress_jobs.update_step(job_id, "b2_import", status="completed")
+            progress_jobs.finish(
+                job_id,
+                message="B2取込まで自動で完了しました。開いているブラウザで印刷してください。",
+                result={"mode": "auto", **_b2_outcome_summary(outcome)},
+            )
+        else:
+            reason = outcome.get("skipped_reason")
+            progress_jobs.update_step(job_id, "b2_import", status="failed", detail=reason)
+            progress_jobs.finish(
+                job_id,
+                message=(
+                    f"自動取込は完了しませんでした（{reason or '理由不明'}）。"
+                    "開いているB2ブラウザで手動で取込・印刷してください。"
+                ),
+                result={"mode": "auto_incomplete", **_b2_outcome_summary(outcome)},
+            )
+
+    job_id = progress_jobs.start(
+        title="B2取込ブラウザ",
+        steps=steps,
+        worker=worker,
+        workflow="yamato_b2_open",
+        metadata={"automate": automate},
+    )
+    return {"job_id": job_id}
+
+
+@app.post("/yamato/b2-open", response_class=HTMLResponse)
+async def yamato_b2_open(request: Request):
+    # JS無効時のフォールバック（モードA=手動のみ）。実Chromeを開いて /yamato へ戻る。
+    form = await _read_form(request)
+    csv_file_raw = form.get("csv_file", "").strip()
+    csv_path = Path(csv_file_raw) if csv_file_raw else resolve_default_b2_csv()
+    if csv_path is not None and Path(csv_path).is_file():
+        try:
+            await run_in_threadpool(b2_chrome.launch, csv_path=Path(csv_path), enable_cdp=False)
+        except Exception:
+            pass
+    return RedirectResponse(url="/yamato", status_code=303)
+
+
+@app.post("/yamato/b2-close", response_class=HTMLResponse)
+async def yamato_b2_close(request: Request):
+    # 印刷完了後にB2ブラウザを閉じる。
+    await run_in_threadpool(b2_chrome.close)
+    return RedirectResponse(url="/yamato", status_code=303)
 
 
 def _log_relpath(raw: str | None) -> str | None:

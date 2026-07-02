@@ -23,7 +23,6 @@
     <span class="flow-chip" data-chip="3"><span class="flow-num">3</span>配送情報CSV取得</span>
     <span class="flow-chip" data-chip="4"><span class="flow-num">4</span>住所補正</span>
     <span class="flow-chip" data-chip="5"><span class="flow-num">5</span>B2取込CSV作成</span>
-    <span class="flow-chip" data-chip="6"><span class="flow-num">6</span>B2へ取込</span>
   </div>
 
   <form method="post" action="/yamato/run-selected" data-progress-form data-progress-endpoint="/yamato/run-selected/start">
@@ -36,7 +35,7 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 4 20 12 6 20 6 4"/></svg>
         ヤマト用CSVを作成する
       </button>
-      <span class="run-note">所要 約3〜5分・完了後にB2取込まで進みます</span>
+      <span class="run-note">所要 約3〜5分・完了後、下の「B2へ取込んで印刷する」へ進みます</span>
     </div>
 
     <details class="adv-fold">
@@ -60,11 +59,11 @@
             <span class="opt-desc">住所データの補正・B2取込CSVの作成</span>
           </span>
         </label>
-        <label class="opt">
-          <input type="checkbox" name="yamato_import_workflow" checked>
+        <label class="opt plain">
+          <input type="checkbox" name="yamato_import_workflow">
           <span>
-            <strong class="opt-title">ヤマトB2への取込</strong>
-            <span class="opt-desc">B2へログインし、作成したCSVを取り込みます</span>
+            <strong class="opt-title">ヤマトB2への取込（上級者向け・自動）</strong>
+            <span class="opt-desc">このボタンでB2取込まで自動実行します。B2が自動操作を弾く場合があるため、通常は下の「B2へ取込んで印刷する」で実Chromeを使ってください。</span>
           </span>
         </label>
         <label class="opt plain">
@@ -84,6 +83,67 @@
       </div>
     </details>
   </form>
+</section>
+
+<section class="panel mt-14">
+  <h2 class="panel-title">B2へ取込んで印刷する</h2>
+  <p class="panel-lead">実際のChromeを開いてヤマトB2へ取込み、そのまま印刷まで行います。印刷が終わるまでブラウザは開いたままにします。</p>
+
+  {% if b2_browser and b2_browser.open %}
+    <div class="result-bar">
+      <span class="tag-ok">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2f7d57" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+        B2ブラウザを開いています
+      </span>
+      <span class="result-sub">{{ b2_browser.started_at[11:16] }} 起動 ・ 印刷が終わったら閉じてOK</span>
+    </div>
+    <div class="note mt-14">
+      <div class="note-title">開いているChromeで操作してください</div>
+      <ol class="note-list">
+        <li>B2クラウド → 外部データ取込 を開く（初回はログイン）</li>
+        <li>取込パターンを選ぶ</li>
+        <li>下記CSVを選択して取込む</li>
+        <li>取込後、送り状を<strong>印刷</strong>する</li>
+      </ol>
+      {% if b2_csv_path %}<p class="mono">取込CSV: {{ b2_csv_path }}</p>{% endif %}
+    </div>
+    <form method="post" action="/yamato/b2-close" class="mt-14">
+      <button class="btn" type="submit">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg>
+        印刷が終わったのでB2ブラウザを閉じる
+      </button>
+    </form>
+  {% else %}
+    <div class="flow">
+      <span class="flow-chip"><span class="flow-num">1</span>実Chromeを開く</span>
+      <span class="flow-chip"><span class="flow-num">2</span>CSVを取込む</span>
+      <span class="flow-chip"><span class="flow-num">3</span>印刷する</span>
+    </div>
+    <form method="post" action="/yamato/b2-open" data-progress-form data-progress-endpoint="/yamato/b2-open/start">
+      <div class="cta-wrap">
+        <button class="btn-cta" type="submit"{% if not b2_csv_path %} disabled{% endif %}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M3 9h18"/></svg>
+          B2取込ブラウザを開く
+        </button>
+        <span class="run-note">実Chromeが開きます・印刷まで開いたまま</span>
+      </div>
+      {% if b2_csv_path %}
+        <p class="adv-note">取込むCSV: <span class="mono">{{ b2_csv_path }}</span></p>
+      {% else %}
+        <div class="note warn mt-14">
+          <div class="note-title">まだB2取込CSVがありません</div>
+          <p>先に上の「ヤマト用CSVを作成する」を実行してください。</p>
+        </div>
+      {% endif %}
+      <label class="opt plain">
+        <input type="checkbox" name="automate">
+        <span>
+          <strong class="opt-title">取込も自動で試す（実験）</strong>
+          <span class="opt-desc">開いたChromeへ接続し取込まで自動を試みます。B2が弾いた場合はそのまま手動で続けられます。</span>
+        </span>
+      </label>
+    </form>
+  {% endif %}
 </section>
 
 <details class="fold mt-14">
@@ -127,7 +187,10 @@
       <h2 id="progress-title">処理状況</h2>
       <p id="progress-message" class="progress-message">開始待ちです。</p>
     </div>
-    <span id="progress-status" class="badge">待機中</span>
+    <div class="progress-head-actions">
+      <span id="progress-status" class="badge">待機中</span>
+      <button type="button" id="progress-cancel" class="btn-stop" hidden>実行を中止</button>
+    </div>
   </div>
   <ol id="progress-steps" class="progress-steps"></ol>
   <p id="progress-error" class="progress-error" hidden></p>
@@ -150,11 +213,13 @@
   const statusBadge = document.getElementById("progress-status");
   const stepsList = document.getElementById("progress-steps");
   const errorBox = document.getElementById("progress-error");
+  const cancelBtn = document.getElementById("progress-cancel");
   const forms = document.querySelectorAll("[data-progress-form]");
+  let currentJobId = null;
 
   // 粗い2段階: prepare=受注取得〜CSV作成(チップ①〜⑤), b2_import=B2取込(チップ⑥)
   const flowChips = [...document.querySelectorAll(".flow [data-chip]")];
-  const STEP_CHIPS = { prepare: [1, 2, 3, 4, 5], b2_import: [6] };
+  const STEP_CHIPS = { ne_fetch: [1], invoice: [2], custom: [3], conversion: [4, 5], b2_import: [6] };
   const clearFlowChips = () => {
     for (const chip of flowChips) chip.classList.remove("is-active", "is-done", "is-failed");
   };
@@ -177,14 +242,16 @@
     }
   };
 
-  const statusLabels = { queued: "待機中", running: "処理中", completed: "完了", failed: "エラー", pending: "待機中" };
+  const statusLabels = { queued: "待機中", running: "処理中", completed: "完了", failed: "エラー", cancelled: "中止", pending: "待機中" };
   const stepLabels = { pending: "待機中", running: "処理中", completed: "完了", failed: "エラー" };
 
   const render = (job) => {
     panel.hidden = false;
     panel.classList.toggle("ok", job.status === "completed");
-    panel.classList.toggle("error", job.status === "failed");
+    panel.classList.toggle("error", job.status === "failed" || job.status === "cancelled");
     panel.classList.toggle("warn", job.status === "running" || job.status === "queued");
+    const active = job.status === "running" || job.status === "queued";
+    if (cancelBtn) cancelBtn.hidden = !active;
     title.textContent = job.title || "処理状況";
     message.textContent = job.message || "";
     statusBadge.textContent = statusLabels[job.status] || job.status;
@@ -222,8 +289,9 @@
       setTimeout(() => window.location.assign("/yamato"), 900);
       return;
     }
-    if (job.status === "failed") {
+    if (job.status === "failed" || job.status === "cancelled") {
       enableButtons();
+      if (cancelBtn) { cancelBtn.hidden = true; cancelBtn.disabled = false; cancelBtn.textContent = "実行を中止"; }
       return;
     }
     setTimeout(() => poll(jobId).catch(showError), 1000);
@@ -262,10 +330,23 @@
           throw new Error(text || "処理を開始できませんでした。");
         }
         const payload = await response.json();
+        currentJobId = payload.job_id;
+        if (cancelBtn) { cancelBtn.hidden = false; cancelBtn.disabled = false; cancelBtn.textContent = "実行を中止"; }
         await poll(payload.job_id);
       } catch (error) {
         showError(error);
       }
+    });
+  }
+
+  if (cancelBtn) {
+    cancelBtn.addEventListener("click", async () => {
+      if (!currentJobId) return;
+      cancelBtn.disabled = true;
+      cancelBtn.textContent = "中止しています…";
+      try {
+        await fetch(`/progress/${currentJobId}/cancel`, { method: "POST" });
+      } catch (e) { /* ポーリングが中止状態を拾う */ }
     });
   }
 })();

@@ -130,7 +130,10 @@
       <h2 id="progress-title">処理状況</h2>
       <p id="progress-message" class="progress-message">開始待ちです。</p>
     </div>
-    <span id="progress-status" class="badge">待機中</span>
+    <div class="progress-head-actions">
+      <span id="progress-status" class="badge">待機中</span>
+      <button type="button" id="progress-cancel" class="btn-stop" hidden>実行を中止</button>
+    </div>
   </div>
   <ol id="progress-steps" class="progress-steps"></ol>
   <dl id="progress-result" class="progress-result" hidden></dl>
@@ -237,7 +240,9 @@
   const stepsList = document.getElementById("progress-steps");
   const resultList = document.getElementById("progress-result");
   const errorBox = document.getElementById("progress-error");
+  const cancelBtn = document.getElementById("progress-cancel");
   const forms = document.querySelectorAll("[data-progress-form]");
+  let currentJobId = null;
 
   // 進捗ステップ key を上部フローチップ(1..6)へ対応付け、実行中ステップのチップを点滅させる。
   const flowChips = [...document.querySelectorAll(".flow [data-chip]")];
@@ -276,6 +281,7 @@
     running: "処理中",
     completed: "完了",
     failed: "エラー",
+    cancelled: "中止",
     pending: "待機中"
   };
 
@@ -360,8 +366,10 @@
   const render = (job) => {
     panel.hidden = false;
     panel.classList.toggle("ok", job.status === "completed");
-    panel.classList.toggle("error", job.status === "failed");
+    panel.classList.toggle("error", job.status === "failed" || job.status === "cancelled");
     panel.classList.toggle("warn", job.status === "running" || job.status === "queued");
+    const active = job.status === "running" || job.status === "queued";
+    if (cancelBtn) cancelBtn.hidden = !active;
     title.textContent = job.title || "処理状況";
     message.textContent = job.message || "";
     statusBadge.textContent = statusLabels[job.status] || job.status;
@@ -419,10 +427,11 @@
     }
     const job = await response.json();
     render(job);
-    if (job.status === "completed" || job.status === "failed") {
+    if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") {
       for (const button of document.querySelectorAll("[data-progress-form] button")) {
         button.disabled = false;
       }
+      if (cancelBtn) { cancelBtn.hidden = true; cancelBtn.disabled = false; cancelBtn.textContent = "実行を中止"; }
       return;
     }
     setTimeout(() => poll(jobId).catch(showError), 1000);
@@ -472,10 +481,23 @@
           throw new Error("処理を開始できませんでした。");
         }
         const payload = await response.json();
+        currentJobId = payload.job_id;
+        if (cancelBtn) { cancelBtn.hidden = false; cancelBtn.disabled = false; cancelBtn.textContent = "実行を中止"; }
         await poll(payload.job_id);
       } catch (error) {
         showError(error);
       }
+    });
+  }
+
+  if (cancelBtn) {
+    cancelBtn.addEventListener("click", async () => {
+      if (!currentJobId) return;
+      cancelBtn.disabled = true;
+      cancelBtn.textContent = "中止しています…";
+      try {
+        await fetch(`/progress/${currentJobId}/cancel`, { method: "POST" });
+      } catch (e) { /* ポーリングが中止状態を拾う */ }
     });
   }
 })();

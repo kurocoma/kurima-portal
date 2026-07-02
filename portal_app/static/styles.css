@@ -1282,6 +1282,39 @@ button {
   gap: 12px;
 }
 
+.progress-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.btn-stop {
+  border: 1px solid #d98a8a;
+  background: #fff;
+  color: #b13b3b;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 6px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-stop:hover {
+  background: #fbeaea;
+}
+
+.btn-stop:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.progress-panel.cancelled {
+  border-color: #e6c15a;
+  background: #fdf7e6;
+}
+
 .progress-head h2 {
   font-size: 15px;
   font-weight: 700;
