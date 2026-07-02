@@ -87,6 +87,16 @@ def _form_bool(form: dict[str, str], key: str) -> bool:
     return form.get(key) in {"1", "true", "on", "yes"}
 
 
+def _form_headed(form: dict[str, str]) -> bool:
+    """ブラウザ表示指定の後方互換読み取り。
+
+    契約入力 headed（checkbox、未チェック時は送信されない）を正とし、
+    browser_mode=front（他ページで使う select 方式）も互換で受け付ける。
+    どちらも無ければ従来どおり False（バックグラウンド実行）。
+    """
+    return _form_bool(form, "headed") or form.get("browser_mode") == "front"
+
+
 def _form_int(form: dict[str, str], key: str, default: int) -> int:
     try:
         return int(form.get(key, "") or default)
@@ -1475,7 +1485,7 @@ async def yamato_run_selected(request: Request):
     selected = _yamato_selected_steps(form)
     order_numbers = _parse_order_numbers(form.get("order_nos"))
     csv_file_raw = form.get("csv_file", "").strip()
-    headed = _form_bool(form, "headed")
+    headed = _form_headed(form)
     verify_invoice_statuses = _form_bool(form, "verify_invoice_statuses")
     confirm_import = _form_bool(form, "confirm_import") or form.get("import_mode", "execute") == "execute"
     slow_mo_ms = _form_int(form, "slow_mo_ms", 150)
@@ -1571,7 +1581,7 @@ async def yamato_run_selected_start(request: Request):
     selected = _yamato_selected_steps(form)
     order_numbers = _parse_order_numbers(form.get("order_nos"))
     csv_file_raw = form.get("csv_file", "").strip()
-    headed = _form_bool(form, "headed")
+    headed = _form_headed(form)
     verify_invoice_statuses = _form_bool(form, "verify_invoice_statuses")
     confirm_import = _form_bool(form, "confirm_import") or form.get("import_mode", "execute") == "execute"
     slow_mo_ms = _form_int(form, "slow_mo_ms", 150)
@@ -1695,7 +1705,7 @@ async def yamato_run_selected_start(request: Request):
 async def yamato_restore_print_wait(request: Request):
     form = await _read_form(request)
     order_numbers = _parse_order_numbers(form.get("order_nos"))
-    headed = _form_bool(form, "headed")
+    headed = _form_headed(form)
     execute = _form_bool(form, "execute") or form.get("restore_mode") == "execute"
     slow_mo_ms = _form_int(form, "slow_mo_ms", 150)
 

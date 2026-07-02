@@ -74,6 +74,13 @@
             <span class="opt-desc">検証時のみ。対象を1件ずつ開いて前後ステータスを記録します。</span>
           </span>
         </label>
+        <label class="opt plain">
+          <input type="checkbox" name="headed" value="on">
+          <span>
+            <strong class="opt-title">ブラウザ画面を表示して実行</strong>
+            <span class="opt-desc">未チェック時は従来どおりバックグラウンド（非表示）で実行します。</span>
+          </span>
+        </label>
       </div>
     </details>
   </form>
@@ -103,6 +110,13 @@
         </label>
         <button class="btn" type="submit">復旧を確認 / 実行</button>
       </div>
+      <label class="opt plain">
+        <input type="checkbox" name="headed" value="on">
+        <span>
+          <strong class="opt-title">ブラウザ画面を表示して実行</strong>
+          <span class="opt-desc">未チェック時は従来どおりバックグラウンド（非表示）で実行します。</span>
+        </span>
+      </label>
     </form>
   </div>
 </details>
@@ -233,9 +247,10 @@
       event.preventDefault();
       const endpoint = form.dataset.progressEndpoint;
       if (!endpoint) { form.submit(); return; }
-      // 送信ボタンの name=headed value=on を含めるため、ボタンを無効化する「前」に本文を構築する
-      // （無効化された control は entry list から除外されるため）。さらに fetch に FormData を渡すと
-      // multipart になりサーバーの parse_qs が読めないので、URLSearchParams で urlencoded 送信する。
+      // フォーム値（headed 等の checkbox や event.submitter の値）を漏れなく含めるため、
+      // ボタンを無効化する「前」に本文を構築する（無効化された control は entry list から除外されるため）。
+      // さらに fetch に FormData を渡すと multipart になりサーバーの parse_qs が読めないので、
+      // URLSearchParams で urlencoded 送信する。
       const body = new URLSearchParams(new FormData(form, event.submitter));
       for (const button of document.querySelectorAll("[data-progress-form] button")) button.disabled = true;
       clearFlowChips();
