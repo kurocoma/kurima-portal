@@ -11,6 +11,7 @@ from typing import Iterable
 import pandas as pd
 
 from portal_app.services.inventory import read_master_tables, read_order_csv
+from portal_app.services.master_cache import cached_by_mtimes
 from portal_app.services.next_engine_downloader import APP_ROOT, download_order_details_to_directory_sync
 from portal_app.services.paths import find_portal_paths
 from portal_app.services.yamato_conversion import read_excel_table
@@ -194,6 +195,7 @@ def prepare_takaesu_order_workflow_sync(
             source = download_result.downloaded_file
 
         if write_order_sheet:
+            output_csv = output_csv or default_takaesu_order_sheet_csv_path()
             order_sheet = create_takaesu_order_sheet_csv(
                 source_csv=source,
                 output_csv=output_csv,
@@ -226,17 +228,47 @@ def prepare_takaesu_order_workflow_sync(
     return result
 
 
+def default_takaesu_order_sheet_csv_path() -> Path:
+    paths = find_portal_paths()
+    return paths.portal_root.joinpath(*TAKAESU_TOOL_DIR_PARTS) / TAKAESU_OUTPUT_FILE
+
+
 def preview_takaesu_order_sheet(
     *,
     source_csv: Path | None = None,
     preview_limit: int = 50,
     write_audit: bool = False,
 ) -> TakaesuOrderSheetResult:
-    return _build_takaesu_order_sheet(
-        source_csv=source_csv,
-        output_csv=None,
-        preview_limit=preview_limit,
-        write_audit=write_audit,
+    """読み取り専用のプレビュー集計。
+
+    書き込み（CSV出力・監査ログ）を伴わない場合のみ、全入力ファイル
+    （受注明細CSV・商品マスタ・高江洲発注書ブック）の mtime を合成キーにした
+    キャッシュを使う。いずれかのファイルが更新されると再計算される。
+    新しい受注明細 CSV が追加された場合も、最新CSVの解決（_latest_data_csv）を
+    毎回行うためキーのパス自体が変わり、キャッシュミスとして再計算される。
+    書き込みを伴う実行経路（write_audit=True や create_takaesu_order_sheet_csv）は
+    キャッシュしない。
+    """
+    if write_audit:
+        return _build_takaesu_order_sheet(
+            source_csv=source_csv,
+            output_csv=None,
+            preview_limit=preview_limit,
+            write_audit=True,
+        )
+
+    paths = find_portal_paths()
+    source = source_csv or _latest_data_csv(paths.portal_root.joinpath(*TAKAESU_SOURCE_DIR_PARTS))
+    order_workbook = paths.portal_root.joinpath(*TAKAESU_TOOL_DIR_PARTS) / TAKAESU_TOOL_WORKBOOK
+    return cached_by_mtimes(
+        (source, paths.master_book, order_workbook),
+        key=f"takaesu_preview:{source}:{preview_limit}",
+        loader=lambda: _build_takaesu_order_sheet(
+            source_csv=source,
+            output_csv=None,
+            preview_limit=preview_limit,
+            write_audit=False,
+        ),
     )
 
 
