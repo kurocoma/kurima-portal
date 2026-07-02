@@ -838,50 +838,45 @@ async def _enter_b2_cloud(page, *, warnings: list[str]):
     if await _is_b2_cloud_page(page):
         return page
 
-    # 送り状発行システムB2クラウドへは sendToSpecified(sendTo=2) のURLで遷移する。
-    # 旧来の ybmCommonJs.useService('06') は現行のメンバーズ画面で ybmContextRoot 未定義となり失敗する
-    # （メニューがJS動的生成でリンク/グローバルが揃わない）ため、URLベースのサービス入口を優先する。
-    try:
-        await page.goto(_yamato_b2_url(), wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(2000)
-        await _follow_meta_refresh_if_present(page)
-        await page.wait_for_timeout(1500)
-        if await _is_b2_cloud_page(page):
-            return page
-    except Exception as exc:
-        warnings.append(f"B2クラウド入口(sendToSpecified)への遷移に失敗: {exc}")
+    # B2クラウド(newb2web)へは**UIクリック導線**で入る。sendToSpecified 等の「直URL遷移」は
+    # system_error を誘発するため使わない（実機ライブ解析で確定。エラー画面の原因欄にも
+    # 「②ブックマーク等でURL直接指定」と明記）。確定した導線:
+    #   メンバーズメニュー「送り状発行システムB2クラウド」= a[href*="openSelectedForyouService('06')"] → サービス詳細(SV0102)
+    #   → 「このサービスを利用する」= ybmCommonJs.useService('06','1_2') → B2クラウド TOP(newb2web/main_menu.html)
 
-    if await _page_contains_any(page, ("このサービスを利用する", "送り状発行システムB2クラウド"), timeout=2000):
+    # STEP1: メンバーズメニュー → サービス詳細(SV0102)。既にSV0102（「このサービスを利用する」有）ならスキップ。
+    on_detail = await _page_contains_any(page, ("このサービスを利用する",), timeout=1500)
+    if not on_detail:
         try:
-            page = await _evaluate_with_optional_popup(
-                page,
-                """() => {
-                  const link = Array.from(document.querySelectorAll("a"))
-                    .find((element) => (element.getAttribute("onclick") || "").includes("useService('06'"));
-                  if (link) {
-                    link.click();
-                  } else if (window.ybmCommonJs && typeof ybmCommonJs.useService === "function") {
-                    ybmCommonJs.useService("06", "2");
-                  }
-                }""",
-            )
-            if await _is_b2_cloud_page(page):
-                return page
+            entry = page.locator("a[href*=\"openSelectedForyouService('06')\"]").first
+            if await entry.count() == 0:
+                entry = page.get_by_text("送り状発行システムB2クラウド").first
+            if await entry.count() > 0:
+                page = await _click_with_optional_popup(page, entry)
+                await page.wait_for_timeout(2500)
+                if await _is_b2_cloud_page(page):
+                    return page
         except Exception as exc:
-            warnings.append(f"B2クラウド起動JavaScriptを実行できませんでした: {exc}")
+            warnings.append(f"メンバーズの「送り状発行システムB2クラウド」クリックに失敗: {exc}")
+
+    # STEP2: サービス詳細「このサービスを利用する」(useService('06','1_2')) → B2クラウド TOP
+    if await _page_contains_any(page, ("このサービスを利用する",), timeout=3000):
         locators = [
             page.locator('a[onclick*="useService(\'06\'"]').first,
-            page.locator("a.js-add-menu-01ex").first,
             page.get_by_text("このサービスを利用する", exact=True).first,
+            page.locator("a.js-add-menu-01ex").first,
         ]
         for locator in locators:
             try:
-                if await locator.is_visible(timeout=2000):
-                    return await _click_with_optional_popup(page, locator)
+                if await locator.count() > 0 and await locator.is_visible(timeout=2000):
+                    page = await _click_with_optional_popup(page, locator)
+                    await page.wait_for_timeout(3000)
+                    if await _is_b2_cloud_page(page):
+                        return page
             except Exception:
                 continue
         try:
-            return await _evaluate_with_optional_popup(
+            page = await _evaluate_with_optional_popup(
                 page,
                 """() => {
                   if (window.ybmCommonJs && typeof ybmCommonJs.useService === "function") {
@@ -890,7 +885,7 @@ async def _enter_b2_cloud(page, *, warnings: list[str]):
                 }""",
             )
         except Exception as exc:
-            warnings.append(f"B2クラウド起動JavaScriptを実行できませんでした: {exc}")
+            warnings.append(f"B2クラウド起動(useService)に失敗: {exc}")
     return page
 
 
@@ -1126,7 +1121,7 @@ async def _wait_for_csv_file_ready(page, expected_file_name: str) -> None:
             && !start.classList.contains("disable"));
           return hasExpectedFile && startEnabled;
         }""",
-        expected_file_name,
+        arg=expected_file_name,
         timeout=15000,
     )
 
