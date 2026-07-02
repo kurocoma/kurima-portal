@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import json
 from dataclasses import dataclass
@@ -9,9 +10,11 @@ from pathlib import Path
 from portal_app.services.next_engine_downloader import APP_ROOT
 from portal_app.services.next_engine_invoice import (
     InvoiceBatchDownloadResult,
+    download_yamato_invoice_batch,
     download_yamato_invoice_batch_sync,
 )
 from portal_app.services.next_engine_yamato import (
+    NextEngineYamatoClient,
     YamatoBuyerDownloadResult,
     YamatoCustomShippingDownloadResult,
     YamatoProductDownloadResult,
@@ -43,6 +46,42 @@ class YamatoB2PreparationResult:
     audit_path: Path
 
 
+async def _run_step(label: str, coro):
+    """取得工程を実行し、失敗時に「どの工程で止まったか」をエラー文へ前置きする。
+
+    生の Playwright 例外（例: Page.wait_for_function: Timeout ...）だけだと、どの取得で
+    止まったか分かりにくいため、工程名を付けて可読性を上げる（ログ観測性の改善）。
+    """
+    try:
+        return await coro
+    except Exception as exc:
+        message = str(exc).strip() or type(exc).__name__
+        raise RuntimeError(f"{label}でエラー: {message}") from exc
+
+
+def _emit(progress, key: str, status: str, detail: str | None = None) -> None:
+    """進捗コールバックを安全に呼ぶ（None なら何もしない）。"""
+    if progress is None:
+        return
+    try:
+        progress(key, status, detail)
+    except Exception:
+        pass
+
+
+async def _tracked_step(progress, key: str, label: str, coro):
+    """工程を running→completed で進捗報告しつつ実行。失敗時は failed 報告＋工程名付きで再送出。"""
+    _emit(progress, key, "running")
+    try:
+        result = await coro
+    except Exception as exc:
+        message = str(exc).strip() or type(exc).__name__
+        _emit(progress, key, "failed", message[:140])
+        raise RuntimeError(f"{label}でエラー: {message}") from exc
+    _emit(progress, key, "completed")
+    return result
+
+
 def prepare_yamato_b2_sync(
     *,
     fetch_next_engine: bool,
@@ -58,14 +97,8 @@ def prepare_yamato_b2_sync(
     headed: bool,
     slow_mo_ms: int,
     preview_limit: int,
+    progress=None,
 ) -> YamatoB2PreparationResult:
-    buyer: YamatoBuyerDownloadResult | None = None
-    product: YamatoProductDownloadResult | None = None
-    invoice: InvoiceBatchDownloadResult | None = None
-    custom_shipping: YamatoCustomShippingDownloadResult | None = None
-    workflow_warnings: list[str] = []
-    target_order_numbers = custom_shipping_order_numbers
-
     if execute_downloads:
         fetch_next_engine = True
     if execute_invoices:
@@ -73,57 +106,284 @@ def prepare_yamato_b2_sync(
     if execute_custom_shipping:
         check_custom_shipping = True
 
-    if fetch_next_engine:
-        buyer = download_yamato_buyer_data_sync(
-            execute=execute_downloads,
-            order_numbers_filter=target_order_numbers,
-            headless=not headed,
-            slow_mo_ms=slow_mo_ms,
+    downloads_kwargs = dict(
+        fetch_next_engine=fetch_next_engine,
+        execute_downloads=execute_downloads,
+        check_invoices=check_invoices,
+        execute_invoices=execute_invoices,
+        verify_invoice_statuses=verify_invoice_statuses,
+        check_custom_shipping=check_custom_shipping,
+        execute_custom_shipping=execute_custom_shipping,
+        target_order_numbers=custom_shipping_order_numbers,
+        output_type=output_type,
+        headed=headed,
+        slow_mo_ms=slow_mo_ms,
+        progress=progress,
+    )
+
+    # 通常は共有セッション（1ブラウザ/1ログイン/メイン機能1回）で全取得を実行し、無駄な開閉を無くす。
+    # verify_invoice_statuses（検証時のみ・既定OFF）はステータス照会が別セッション＋同ロックを取り
+    # デッドロックするため、その場合だけ従来の個別セッション経路にフォールバックする。
+    if verify_invoice_statuses:
+        buyer, product, invoice, custom_shipping, workflow_warnings = _run_downloads_legacy(
+            **downloads_kwargs
         )
-        product = download_yamato_product_data_sync(
-            execute=execute_downloads,
-            output_type=output_type,
-            order_numbers_filter=target_order_numbers,
-            headless=not headed,
-            slow_mo_ms=slow_mo_ms,
+    else:
+        buyer, product, invoice, custom_shipping, workflow_warnings = asyncio.run(
+            _run_downloads_shared(**downloads_kwargs)
         )
 
-    if check_invoices:
-        invoice = download_yamato_invoice_batch_sync(
-            execute=execute_invoices,
-            order_numbers_filter=target_order_numbers,
-            verify_statuses=verify_invoice_statuses,
-            headless=not headed,
-            slow_mo_ms=slow_mo_ms,
+    # ④ 住所補正・B2取込CSV作成
+    _emit(progress, "conversion", "running")
+    try:
+        result = _finalize_prepare(
+            buyer=buyer,
+            product=product,
+            invoice=invoice,
+            custom_shipping=custom_shipping,
+            workflow_warnings=workflow_warnings,
+            execute_custom_shipping=execute_custom_shipping,
+            write_conversion=write_conversion,
+            preview_limit=preview_limit,
         )
+    except Exception as exc:
+        _emit(progress, "conversion", "failed", (str(exc).strip() or type(exc).__name__)[:140])
+        raise
+    _emit(progress, "conversion", "completed")
+    return result
 
-    effective_custom_shipping_order_numbers = target_order_numbers
-    if (
-        not effective_custom_shipping_order_numbers
-        and invoice
-        and invoice.before_list.order_numbers
-    ):
-        effective_custom_shipping_order_numbers = invoice.before_list.order_numbers
+
+def _custom_shipping_plan(
+    *,
+    target_order_numbers: tuple[str, ...],
+    invoice: InvoiceBatchDownloadResult | None,
+    check_custom_shipping: bool,
+    execute_custom_shipping: bool,
+    execute_invoices: bool,
+) -> tuple[tuple[str, ...], bool, bool, str | None]:
+    """配送情報CSVの対象伝票番号と実行可否を決める（両経路で共通）。
+
+    戻り値: (effective_order_numbers, do_download, execute_custom_shipping, warning)
+    """
+    effective = target_order_numbers
+    if not effective and invoice and invoice.before_list.order_numbers:
+        effective = invoice.before_list.order_numbers
+    warning: str | None = None
     if (
         execute_custom_shipping
         and execute_invoices
         and invoice
         and (invoice.error or invoice.skipped_reason or not invoice.downloaded_file)
     ):
-        workflow_warnings.append(
-            "配送情報CSVは納品書PDF一括DLが完了していないためスキップしました。"
-        )
-        check_custom_shipping = False
-        execute_custom_shipping = False
+        warning = "配送情報CSVは納品書PDF一括DLが完了していないためスキップしました。"
+        return effective, False, False, warning
+    return effective, check_custom_shipping, execute_custom_shipping, warning
 
-    if check_custom_shipping:
-        custom_shipping = download_yamato_custom_shipping_data_sync(
-            execute=execute_custom_shipping,
-            order_numbers_filter=effective_custom_shipping_order_numbers,
-            headless=not headed,
-            slow_mo_ms=slow_mo_ms,
-        )
 
+def _run_downloads_legacy(
+    *,
+    fetch_next_engine: bool,
+    execute_downloads: bool,
+    check_invoices: bool,
+    execute_invoices: bool,
+    verify_invoice_statuses: bool,
+    check_custom_shipping: bool,
+    execute_custom_shipping: bool,
+    target_order_numbers: tuple[str, ...],
+    output_type: str,
+    headed: bool,
+    slow_mo_ms: int,
+    progress=None,
+) -> tuple[
+    YamatoBuyerDownloadResult | None,
+    YamatoProductDownloadResult | None,
+    InvoiceBatchDownloadResult | None,
+    YamatoCustomShippingDownloadResult | None,
+    list[str],
+]:
+    """従来どおり各取得を個別セッションで実行（verify_invoice_statuses 時のフォールバック）。"""
+    buyer = product = invoice = custom_shipping = None
+    workflow_warnings: list[str] = []
+
+    if fetch_next_engine:
+        _emit(progress, "ne_fetch", "running")
+        try:
+            buyer = download_yamato_buyer_data_sync(
+                execute=execute_downloads,
+                order_numbers_filter=target_order_numbers,
+                headless=not headed,
+                slow_mo_ms=slow_mo_ms,
+            )
+            product = download_yamato_product_data_sync(
+                execute=execute_downloads,
+                output_type=output_type,
+                order_numbers_filter=target_order_numbers,
+                headless=not headed,
+                slow_mo_ms=slow_mo_ms,
+            )
+        except Exception as exc:
+            _emit(progress, "ne_fetch", "failed", (str(exc).strip() or type(exc).__name__)[:140])
+            raise
+        _emit(progress, "ne_fetch", "completed")
+    else:
+        _emit(progress, "ne_fetch", "completed", "スキップ")
+
+    if check_invoices:
+        _emit(progress, "invoice", "running")
+        try:
+            invoice = download_yamato_invoice_batch_sync(
+                execute=execute_invoices,
+                order_numbers_filter=target_order_numbers,
+                verify_statuses=verify_invoice_statuses,
+                headless=not headed,
+                slow_mo_ms=slow_mo_ms,
+            )
+        except Exception as exc:
+            _emit(progress, "invoice", "failed", (str(exc).strip() or type(exc).__name__)[:140])
+            raise
+        _emit(progress, "invoice", "completed")
+    else:
+        _emit(progress, "invoice", "completed", "スキップ")
+
+    effective, do_custom, execute_custom_shipping, warning = _custom_shipping_plan(
+        target_order_numbers=target_order_numbers,
+        invoice=invoice,
+        check_custom_shipping=check_custom_shipping,
+        execute_custom_shipping=execute_custom_shipping,
+        execute_invoices=execute_invoices,
+    )
+    if warning:
+        workflow_warnings.append(warning)
+    if do_custom:
+        _emit(progress, "custom", "running")
+        try:
+            custom_shipping = download_yamato_custom_shipping_data_sync(
+                execute=execute_custom_shipping,
+                order_numbers_filter=effective,
+                headless=not headed,
+                slow_mo_ms=slow_mo_ms,
+            )
+        except Exception as exc:
+            _emit(progress, "custom", "failed", (str(exc).strip() or type(exc).__name__)[:140])
+            raise
+        _emit(progress, "custom", "completed")
+    else:
+        _emit(progress, "custom", "completed", "スキップ" if not warning else warning)
+
+    return buyer, product, invoice, custom_shipping, workflow_warnings
+
+
+async def _run_downloads_shared(
+    *,
+    fetch_next_engine: bool,
+    execute_downloads: bool,
+    check_invoices: bool,
+    execute_invoices: bool,
+    verify_invoice_statuses: bool,
+    check_custom_shipping: bool,
+    execute_custom_shipping: bool,
+    target_order_numbers: tuple[str, ...],
+    output_type: str,
+    headed: bool,
+    slow_mo_ms: int,
+    progress=None,
+) -> tuple[
+    YamatoBuyerDownloadResult | None,
+    YamatoProductDownloadResult | None,
+    InvoiceBatchDownloadResult | None,
+    YamatoCustomShippingDownloadResult | None,
+    list[str],
+]:
+    """共有セッション（1ブラウザ/1ログイン/メイン機能1回）で全取得を実行する。
+
+    各取得は同一 context の新ページで走り、ブラウザ再起動・再ログインを行わない。
+    progress(key, status, detail) を工程ごとに呼び、どこまで進んだ/どこで止まったかを可視化する。
+    """
+    buyer = product = invoice = custom_shipping = None
+    workflow_warnings: list[str] = []
+
+    client = NextEngineYamatoClient(headless=not headed, slow_mo_ms=slow_mo_ms)
+    async with client.open_shared_session():
+        # ① NEデータ取得（購入者＋商品）
+        if fetch_next_engine:
+            _emit(progress, "ne_fetch", "running")
+            try:
+                buyer = await _run_step(
+                    "購入者データ取得(NE)",
+                    client.download_buyer_data(
+                        execute=execute_downloads,
+                        order_numbers_filter=target_order_numbers,
+                    ),
+                )
+                product = await _run_step(
+                    "商品情報データ取得(NE)",
+                    client.download_product_data(
+                        execute=execute_downloads,
+                        output_type=output_type,
+                        order_numbers_filter=target_order_numbers,
+                    ),
+                )
+            except Exception as exc:
+                _emit(progress, "ne_fetch", "failed", (str(exc).strip() or type(exc).__name__)[:140])
+                raise
+            _emit(progress, "ne_fetch", "completed")
+        else:
+            _emit(progress, "ne_fetch", "completed", "スキップ")
+
+        # ② 納品書PDF取得
+        if check_invoices:
+            invoice = await _tracked_step(
+                progress,
+                "invoice",
+                "納品書PDF取得(NE)",
+                download_yamato_invoice_batch(
+                    execute=execute_invoices,
+                    order_numbers_filter=target_order_numbers,
+                    verify_statuses=verify_invoice_statuses,
+                    slow_mo_ms=slow_mo_ms,
+                    client=client,
+                ),
+            )
+        else:
+            _emit(progress, "invoice", "completed", "スキップ")
+
+        # ③ 配送情報CSV取得
+        effective, do_custom, execute_custom_shipping, warning = _custom_shipping_plan(
+            target_order_numbers=target_order_numbers,
+            invoice=invoice,
+            check_custom_shipping=check_custom_shipping,
+            execute_custom_shipping=execute_custom_shipping,
+            execute_invoices=execute_invoices,
+        )
+        if warning:
+            workflow_warnings.append(warning)
+        if do_custom:
+            custom_shipping = await _tracked_step(
+                progress,
+                "custom",
+                "配送情報CSV取得(NE)",
+                client.download_custom_shipping_data(
+                    execute=execute_custom_shipping,
+                    order_numbers_filter=effective,
+                ),
+            )
+        else:
+            _emit(progress, "custom", "completed", "スキップ" if not warning else warning)
+
+    return buyer, product, invoice, custom_shipping, workflow_warnings
+
+
+def _finalize_prepare(
+    *,
+    buyer: YamatoBuyerDownloadResult | None,
+    product: YamatoProductDownloadResult | None,
+    invoice: InvoiceBatchDownloadResult | None,
+    custom_shipping: YamatoCustomShippingDownloadResult | None,
+    workflow_warnings: list[str],
+    execute_custom_shipping: bool,
+    write_conversion: bool,
+    preview_limit: int,
+) -> YamatoB2PreparationResult:
     source_csv = custom_shipping.downloaded_file if custom_shipping and custom_shipping.downloaded_file else None
     conversion_write = write_conversion
     if execute_custom_shipping and custom_shipping and not custom_shipping.downloaded_file:

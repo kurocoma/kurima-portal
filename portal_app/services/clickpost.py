@@ -406,6 +406,23 @@ def create_clickpost_tracking_reflection_csv(
         preview_limit=preview_limit,
     )
 
+async def check_clickpost_login(
+    *,
+    headless: bool | None = None,
+    slow_mo_ms: int = 0,
+) -> dict[str, object]:
+    client = ClickPostClient(headless=headless, slow_mo_ms=slow_mo_ms)
+    return await client.check_login()
+
+
+def check_clickpost_login_sync(
+    *,
+    headless: bool | None = None,
+    slow_mo_ms: int = 0,
+) -> dict[str, object]:
+    return asyncio.run(check_clickpost_login(headless=headless, slow_mo_ms=slow_mo_ms))
+
+
 async def inspect_clickpost_order_list(
     *,
     headless: bool | None = None,
@@ -880,6 +897,29 @@ def prepare_clickpost_sync(
     return result
 
 
+async def _new_download_context(
+    browser,
+    *,
+    storage_state_path: Path,
+    viewport_width: int = 1366,
+    viewport_height: int = 900,
+):
+    """Create a browser context configured for ClickPost/NE download flows.
+
+    Consolidates the ``accept_downloads`` / ``locale`` / ``viewport`` /
+    ``storage_state`` context options that were previously duplicated verbatim
+    in every browser session (NE order list + 4 ClickPost stages).
+    """
+    context_kwargs: dict[str, object] = {
+        "accept_downloads": True,
+        "locale": "ja-JP",
+        "viewport": {"width": viewport_width, "height": viewport_height},
+    }
+    if storage_state_path.exists():
+        context_kwargs["storage_state"] = str(storage_state_path)
+    return await browser.new_context(**context_kwargs)
+
+
 class NextEngineClickPostClient:
     def __init__(self, *, headless: bool | None, slow_mo_ms: int) -> None:
         self.headless = _headless_default() if headless is None else headless
@@ -1116,14 +1156,11 @@ class _ClickPostOrderListSession:
             self.browser = await self.playwright.chromium.launch(
                 **_chromium_launch_options(self.client.headless, self.client.slow_mo_ms)
             )
-            context_kwargs: dict[str, object] = {
-                "accept_downloads": True,
-                "locale": "ja-JP",
-                "viewport": {"width": 1400, "height": 900},
-            }
-            if STORAGE_STATE_PATH.exists():
-                context_kwargs["storage_state"] = str(STORAGE_STATE_PATH)
-            self.context = await self.browser.new_context(**context_kwargs)
+            self.context = await _new_download_context(
+                self.browser,
+                storage_state_path=STORAGE_STATE_PATH,
+                viewport_width=1400,
+            )
             self.page = await self.context.new_page()
             _auto_accept_dialogs(self.page)
             await _open_clickpost_order_list_page(self.page, self.client.login_client)
@@ -1149,6 +1186,51 @@ class ClickPostClient:
         self.headless = _clickpost_headless_default() if headless is None else headless
         self.slow_mo_ms = slow_mo_ms
         self.credential = _load_clickpost_credential()
+
+    async def check_login(self) -> dict[str, object]:
+        """Read-only login/session diagnostic.
+
+        Logs in (reusing ``clickpost.json`` storage_state when still valid) and
+        reports where the session landed. Performs NO CSV upload / payment /
+        print side effects, so it is safe to call purely for observability and
+        for verifying that the ClickPost/Yahoo login path works. Always saves a
+        screenshot + HTML so a failure shows *where* it stopped.
+        """
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(
+                **_chromium_launch_options(self.headless, self.slow_mo_ms)
+            )
+            try:
+                context = await _new_download_context(
+                    browser, storage_state_path=CLICKPOST_STORAGE_STATE_PATH
+                )
+                page = None
+                try:
+                    page = await context.new_page()
+                    await self._login(page)
+                    await page.goto(
+                        CLICKPOST_MYPAGE_URL,
+                        wait_until="domcontentloaded",
+                        timeout=60000,
+                    )
+                    await page.wait_for_timeout(1000)
+                    logged_in = await _page_contains(page, "マイページ", timeout=10000)
+                    title = await _safe_page_title(page)
+                    screenshot, html = await _save_clickpost_debug_artifacts(
+                        page, "clickpost_login_check"
+                    )
+                    await context.storage_state(path=str(CLICKPOST_STORAGE_STATE_PATH))
+                    return {
+                        "logged_in": logged_in,
+                        "url": getattr(page, "url", None),
+                        "title": title,
+                        "screenshot": str(screenshot) if screenshot else None,
+                        "html": str(html) if html else None,
+                    }
+                finally:
+                    await context.close()
+            finally:
+                await browser.close()
 
     async def upload_csv(
         self,
@@ -1188,14 +1270,9 @@ class ClickPostClient:
                 **_chromium_launch_options(self.headless, self.slow_mo_ms)
             )
             try:
-                context_kwargs: dict[str, object] = {
-                    "accept_downloads": True,
-                    "locale": "ja-JP",
-                    "viewport": {"width": 1366, "height": 900},
-                }
-                if CLICKPOST_STORAGE_STATE_PATH.exists():
-                    context_kwargs["storage_state"] = str(CLICKPOST_STORAGE_STATE_PATH)
-                context = await browser.new_context(**context_kwargs)
+                context = await _new_download_context(
+                    browser, storage_state_path=CLICKPOST_STORAGE_STATE_PATH
+                )
                 try:
                     page = await context.new_page()
                     await self._login(page)
@@ -1262,14 +1339,9 @@ class ClickPostClient:
                 **_chromium_launch_options(self.headless, self.slow_mo_ms)
             )
             try:
-                context_kwargs: dict[str, object] = {
-                    "accept_downloads": True,
-                    "locale": "ja-JP",
-                    "viewport": {"width": 1366, "height": 900},
-                }
-                if CLICKPOST_STORAGE_STATE_PATH.exists():
-                    context_kwargs["storage_state"] = str(CLICKPOST_STORAGE_STATE_PATH)
-                context = await browser.new_context(**context_kwargs)
+                context = await _new_download_context(
+                    browser, storage_state_path=CLICKPOST_STORAGE_STATE_PATH
+                )
                 try:
                     page = await context.new_page()
                     await self._login(page)
@@ -1440,14 +1512,9 @@ class ClickPostClient:
                 **_chromium_launch_options(self.headless, self.slow_mo_ms)
             )
             try:
-                context_kwargs: dict[str, object] = {
-                    "accept_downloads": True,
-                    "locale": "ja-JP",
-                    "viewport": {"width": 1366, "height": 900},
-                }
-                if CLICKPOST_STORAGE_STATE_PATH.exists():
-                    context_kwargs["storage_state"] = str(CLICKPOST_STORAGE_STATE_PATH)
-                context = await browser.new_context(**context_kwargs)
+                context = await _new_download_context(
+                    browser, storage_state_path=CLICKPOST_STORAGE_STATE_PATH
+                )
                 page = None
                 try:
                     page = await context.new_page()
@@ -1579,14 +1646,9 @@ class ClickPostClient:
                 **_chromium_launch_options(self.headless, self.slow_mo_ms)
             )
             try:
-                context_kwargs: dict[str, object] = {
-                    "accept_downloads": True,
-                    "locale": "ja-JP",
-                    "viewport": {"width": 1366, "height": 900},
-                }
-                if CLICKPOST_STORAGE_STATE_PATH.exists():
-                    context_kwargs["storage_state"] = str(CLICKPOST_STORAGE_STATE_PATH)
-                context = await browser.new_context(**context_kwargs)
+                context = await _new_download_context(
+                    browser, storage_state_path=CLICKPOST_STORAGE_STATE_PATH
+                )
                 try:
                     page = await context.new_page()
                     await self._login(page)
@@ -2794,24 +2856,6 @@ def _infer_content_prefix(product_name: str) -> str:
     return "雑貨"
 
 
-def _split_clickpost_address(address: str) -> tuple[str, str, str, str]:
-    text = unicodedata.normalize("NFKC", address or "")
-    text = re.sub(r"\s+", "", text).strip()
-    if not text:
-        return "", "", "", ""
-
-    split_at = _building_start_index(text)
-    if split_at is not None:
-        lines = [text[:split_at], text[split_at:]]
-    else:
-        lines = [text]
-
-    normalized = [line for line in (_tidy_address_line(line) for line in lines) if line]
-    while len(normalized) < 4:
-        normalized.append("")
-    return tuple(normalized[:4])  # type: ignore[return-value]
-
-
 def _building_start_index(text: str) -> int | None:
     candidates: list[int] = []
     for keyword in BUILDING_KEYWORDS:
@@ -2824,10 +2868,6 @@ def _building_start_index(text: str) -> int | None:
         candidates.append(latin.start(1))
 
     return min(candidates) if candidates else None
-
-
-def _tidy_address_line(line: str) -> str:
-    return line.replace("ｰ", "-").replace("－", "-").replace("―", "-").strip()
 
 
 def _format_zip(value: str) -> str:

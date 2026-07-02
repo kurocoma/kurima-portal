@@ -678,22 +678,18 @@ async def _retry_b2_system_error(
 
 
 async def _enter_and_locate_import_page(page, *, warnings: list[str]):
-    """B2クラウドへ入り、外部データ取込画面まで遷移する。到達できたら (page, True)。"""
+    """B2クラウドへ入り、外部データ取込画面まで遷移する。到達できたら (page, True)。
+
+    重要: 取込画面へは**UIクリック導線**（B2クラウド→外部データから発行タイル）でのみ遷移する。
+    取込URL(ex_data_import.html)への page.goto は「URL直接指定」と判定され system_error を誘発するため使わない
+    （実機で確認: 手動クリック導線では出ないが直URLでは system_error。エラー画面の原因欄にも
+    「②ブックマーク等でURLを直接指定」「④複数タブ」と明記）。
+    """
     page = await _enter_b2_cloud(page, warnings=warnings)
     if await _is_import_page(page):
         return page, True
     if await _click_external_data_import_tile(page, warnings=warnings):
         return page, True
-
-    try:
-        await page.goto(YAMATO_B2_IMPORT_PAGE_URL, wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(3000)
-        if await _is_import_page(page):
-            return page, True
-        if await _click_external_data_import_tile(page, warnings=warnings):
-            return page, True
-    except Exception as exc:
-        warnings.append(f"B2 import page direct navigation failed: {exc}")
 
     for label in IMPORT_PAGE_LABELS:
         clicked = await _click_text_if_visible(page, label, optional=True)
@@ -1041,43 +1037,53 @@ async def _selected_import_pattern_text(page) -> str:
 
 
 async def _select_csv_file(page, csv_file: Path, *, warnings: list[str]) -> bool:
-    input_found = False
-    for selector in YAMATO_B2_FILE_INPUT_SELECTORS:
-        locator = page.locator(selector)
+    # B2の「ファイル選択」はネイティブのファイルダイアログを開く方式。file_chooser で読ませると
+    # B2のJSがCSVを解析し「データ抜粋」「紐付け」が埋まり、取込み開始が有効化される（実機確認済み）。
+    # 隠し #input_file への set_input_files だけでは B2 のJSが読み込まず、紐付けが空のまま取込不可になる。
+    csv_str = str(csv_file)
+    loaded = False
+    for button_sel in ("#file_button", "a#file_button", "text=ファイル選択"):
         try:
-            count = await locator.count()
-            for index in range(count):
-                candidate = locator.nth(index)
-                await candidate.wait_for(state="attached", timeout=5000)
-                input_found = True
-                await candidate.set_input_files(str(csv_file))
-                await _set_b2_import_start_row(page)
-                await candidate.evaluate(
-                    """(element) => {
-                      element.dispatchEvent(new Event("input", { bubbles: true }));
-                      element.dispatchEvent(new Event("change", { bubbles: true }));
-                    }"""
-                )
-                try:
-                    await _wait_for_csv_file_ready(page, csv_file.name)
-                except PlaywrightTimeoutError:
-                    pass
-                if await _b2_import_start_enabled(page) and await _b2_selected_file_matches(
-                    page,
-                    csv_file.name,
-                ):
-                    return True
-        except PlaywrightTimeoutError:
-            continue
+            button = page.locator(button_sel).first
+            if await button.count() == 0:
+                continue
+            async with page.expect_file_chooser(timeout=8000) as fc_info:
+                await button.click(timeout=5000)
+            chooser = await fc_info.value
+            await chooser.set_files(csv_str)
+            loaded = True
+            break
         except Exception:
             continue
-    if input_found:
-        await page.wait_for_timeout(1500)
-        if await _b2_import_start_enabled(page) and await _b2_selected_file_matches(
-            page,
-            csv_file.name,
-        ):
-            return True
+
+    if not loaded:
+        # フォールバック: 隠し file input へ直接セット（旧方式・環境により有効な場合あり）
+        for selector in YAMATO_B2_FILE_INPUT_SELECTORS:
+            locator = page.locator(selector)
+            try:
+                count = await locator.count()
+                for index in range(count):
+                    candidate = locator.nth(index)
+                    await candidate.wait_for(state="attached", timeout=5000)
+                    await candidate.set_input_files(csv_str)
+                    await candidate.evaluate(
+                        """(element) => {
+                          element.dispatchEvent(new Event("input", { bubbles: true }));
+                          element.dispatchEvent(new Event("change", { bubbles: true }));
+                        }"""
+                    )
+                    loaded = True
+            except Exception:
+                continue
+
+    await _set_b2_import_start_row(page)
+    try:
+        await _wait_for_csv_file_ready(page, csv_file.name)
+    except PlaywrightTimeoutError:
+        pass
+    if await _b2_import_start_enabled(page) and await _b2_selected_file_matches(page, csv_file.name):
+        return True
+    if loaded:
         warnings.append("B2 CSV file was set, but the import start button was not enabled.")
     return False
 
@@ -1565,3 +1571,115 @@ def _storage_state_path() -> Path:
 def _yamato_b2_headless_default() -> bool:
     raw = os.environ.get(HEADLESS_ENV, os.environ.get("NEXT_ENGINE_HEADLESS", "true"))
     return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def resolve_default_b2_csv() -> Path | None:
+    """最新のB2取込CSVパスを返す（無ければ None）。UI表示・受け渡し用。"""
+    try:
+        return _resolve_csv_file(None)
+    except Exception:
+        return None
+
+
+async def run_b2_import_over_cdp(
+    cdp_endpoint: str,
+    *,
+    csv_file: Path | None,
+    execute_import: bool,
+    confirm_import: bool,
+) -> dict:
+    """CDP接続した実Chrome上でB2取込ステップを試行する（モードB）。
+
+    - ブラウザは閉じない（playwright.stop() で切断のみ＝実Chromeは印刷用に開いたまま）。
+      connect_over_cdp した実Chromeは Playwright の所有ではないため browser.close() は呼ばない
+      （呼ぶとユーザーのタブ/コンテキストを巻き込む恐れがあるため）。
+    - B2縮退（[[portal-tool-yamato-b2]]）や失敗時も例外を投げず warnings に記録して返す
+      （＝手動フォールバック。呼び出し元は開いたままのChromeで手動取込・印刷できる）。
+    """
+    warnings: list[str] = []
+    selected_csv = _resolve_csv_file(csv_file)
+    rows, headers, csv_warnings = _read_b2_csv(selected_csv)
+    warnings.extend(csv_warnings)
+    if not _csv_ready(headers=headers, rows=len(rows), warnings=warnings):
+        return {
+            "ok": False,
+            "import_executed": False,
+            "file_selected": False,
+            "ready_to_import": False,
+            "skipped_reason": "invalid_csv",
+            "warnings": warnings,
+            "csv_file": str(selected_csv),
+            "execute": False,
+        }
+
+    login_id = os.environ.get(LOGIN_ID_ENV, "").strip()
+    password = os.environ.get(PASSWORD_ENV, "").strip()
+    execute = bool(execute_import and confirm_import)
+
+    import_executed = False
+    file_selected = False
+    ready_to_import = False
+    skipped_reason: str | None = None
+
+    playwright = await async_playwright().start()
+    try:
+        browser = await playwright.chromium.connect_over_cdp(cdp_endpoint)
+        # 既存の実Chromeのコンテキスト/タブを再利用する（閉じないため browser.close() は使わない）。
+        context = browser.contexts[0] if browser.contexts else await browser.new_context()
+        await _install_b2_page_workarounds(context)
+        page = context.pages[0] if context.pages else await context.new_page()
+        try:
+            if login_id and password:
+                await _login_to_b2(page, login_id=login_id, password=password, warnings=warnings)
+            page, ready_to_import = await _open_import_page(
+                page, login_id=login_id, password=password, warnings=warnings
+            )
+            if not ready_to_import:
+                skipped_reason = "import_page_not_confirmed"
+            elif not await _select_next_engine_import_pattern(page, warnings=warnings):
+                skipped_reason = "import_pattern_not_selected"
+            else:
+                file_selected = await _select_csv_file(page, selected_csv, warnings=warnings)
+                if not file_selected:
+                    skipped_reason = "file_input_not_found"
+                elif execute:
+                    import_executed = await _execute_import_clicks(page, warnings=warnings)
+                    if not import_executed:
+                        skipped_reason = "import_completion_not_confirmed"
+        except Exception as exc:
+            skipped_reason = f"browser_error:{type(exc).__name__}"
+            warnings.append(str(exc))
+    finally:
+        # 実Chromeは閉じない。driver を止めてCDP接続だけ切る（印刷まで開いたまま）。
+        try:
+            await playwright.stop()
+        except Exception:
+            pass
+
+    return {
+        "ok": import_executed if execute else file_selected,
+        "import_executed": import_executed,
+        "file_selected": file_selected,
+        "ready_to_import": ready_to_import,
+        "skipped_reason": skipped_reason,
+        "warnings": warnings,
+        "csv_file": str(selected_csv),
+        "execute": execute,
+    }
+
+
+def run_b2_import_over_cdp_sync(
+    cdp_endpoint: str,
+    *,
+    csv_file: Path | None,
+    execute_import: bool,
+    confirm_import: bool,
+) -> dict:
+    return asyncio.run(
+        run_b2_import_over_cdp(
+            cdp_endpoint,
+            csv_file=csv_file,
+            execute_import=execute_import,
+            confirm_import=confirm_import,
+        )
+    )

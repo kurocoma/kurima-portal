@@ -239,16 +239,43 @@ class NextEngineOrderDetailDownloader:
 
         await self._close_extra_news_pages(page)
         await self._remove_backdrops(page)
-        if open_main:
-            await self._open_main_function(page)
+        # main.next-engine.com（受注/明細/カスタムデータ等）へは「メイン機能」経由でしかセッションを確立できない。
+        # 直接URLは base へリダイレクトされるため、ログイン時に必ず main セッションを確立しておく。
+        # open_main 引数は後方互換のため残すが、常に実行する（_open_main_function はリンク非表示なら何もしない）。
+        await self._open_main_function(page)
         await self._close_extra_news_pages(page)
 
     async def _open_main_function(self, page: Page) -> None:
+        # NEはログイン後プラットフォーム(base.next-engine.org)に着地し、旧受注管理(main.next-engine.com)へは
+        # 「メイン機能」経由でしか入れない（直接URLはbaseへリダイレクトされる）。
+        # 「メイン機能」は main.next-engine.com を新規タブで開く。セッションはcontext共有のクッキーのため、
+        # 一度踏めば新タブを閉じても同context内の任意ページから main へ遷移できる（実測確認済み）。
         main_link = page.get_by_role("link", name="メイン機能")
-        if await _is_visible(main_link, timeout=8000):
-            await main_link.click()
-            await page.wait_for_load_state("domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(2500)
+        if not await _is_visible(main_link, timeout=8000):
+            return
+        new_page = None
+        try:
+            async with page.context.expect_page(timeout=15000) as popup:
+                await main_link.click()
+            new_page = await popup.value
+        except PlaywrightTimeoutError:
+            new_page = None
+        if new_page is not None and new_page is not page:
+            try:
+                await new_page.wait_for_load_state("domcontentloaded", timeout=60000)
+                await new_page.wait_for_timeout(1500)
+            finally:
+                try:
+                    await new_page.close()
+                except Exception:
+                    pass
+        else:
+            # 新規タブが開かなかった場合は同一ページ遷移（旧挙動）を待つ。
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=60000)
+                await page.wait_for_timeout(2000)
+            except Exception:
+                pass
 
     async def _dismiss_cookie_banner(self, page: Page) -> None:
         try:

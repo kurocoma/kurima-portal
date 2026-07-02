@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -209,6 +210,58 @@ class NextEngineYamatoClient:
             headless=self.headless,
             slow_mo_ms=slow_mo_ms,
         )
+        # 共有セッション（prepare で複数取得を1ブラウザ/1ログインに束ねる）用。
+        # None のとき各取得は従来どおり自前でブラウザ起動＋ログインする（後方互換）。
+        self.shared_context = None
+
+    @asynccontextmanager
+    async def open_shared_session(self):
+        """NEセッションを1回だけ開く（ブラウザ起動＋ログイン＋「メイン機能」ハンドシェイクを1回）。
+
+        コンテキスト内では self.shared_context がセットされ、以降の
+        download_buyer_data / download_product_data / download_custom_shipping_data や
+        （client を渡した）invoice 取得が、同一 context の新ページで**再ログイン無し**に走る。
+        prepare の各取得が毎回ブラウザ/ログインを開き直していた無駄（5起動/5ログイン）を
+        1起動/1ログインに削減するためのもの。ロックはこの1回だけ保持する。
+        """
+        lock = _next_engine_storage_lock()
+        lock.__enter__()
+        playwright = None
+        browser = None
+        context = None
+        try:
+            playwright = await async_playwright().start()
+            browser = await playwright.chromium.launch(
+                **_chromium_launch_options(self.headless, self.slow_mo_ms)
+            )
+            context_kwargs: dict[str, object] = {
+                "accept_downloads": True,
+                "locale": "ja-JP",
+                "viewport": {"width": 1400, "height": 900},
+            }
+            if STORAGE_STATE_PATH.exists():
+                context_kwargs["storage_state"] = str(STORAGE_STATE_PATH)
+            context = await browser.new_context(**context_kwargs)
+            login_page = await context.new_page()
+            await self.login_client._login(login_page)  # メイン機能ハンドシェイク込み・1回だけ
+            await context.storage_state(path=str(STORAGE_STATE_PATH))
+            await login_page.close()
+            self.shared_context = context
+            yield context
+        finally:
+            self.shared_context = None
+            try:
+                if context is not None:
+                    await context.storage_state(path=str(STORAGE_STATE_PATH))
+            except Exception:
+                pass
+            if context is not None:
+                await context.close()
+            if browser is not None:
+                await browser.close()
+            if playwright is not None:
+                await playwright.stop()
+            lock.__exit__(None, None, None)
 
     async def inspect_order_list(
         self,
@@ -431,10 +484,13 @@ class _FilteredOrderListSession:
         self.context = None
         self.page = None
         self.storage_lock = None
+        self._shared = False
 
     async def __aenter__(self):
-        self.storage_lock = _next_engine_storage_lock()
-        self.storage_lock.__enter__()
+        # 共有セッション中はロック/ブラウザは client 側が保持済み。二重取得を避ける。
+        if self.client.shared_context is None:
+            self.storage_lock = _next_engine_storage_lock()
+            self.storage_lock.__enter__()
         try:
             return await self._open()
         except Exception:
@@ -442,6 +498,19 @@ class _FilteredOrderListSession:
             raise
 
     async def _open(self):
+        if self.client.shared_context is not None:
+            # 共有 context に新ページを開くだけ（再ログイン・再起動なし）。
+            self._shared = True
+            self.context = self.client.shared_context
+            self.page = await self.context.new_page()
+            await self._goto_order_list()
+            await self.page.wait_for_timeout(1500)
+            await _filter_yamato_shipping_methods(
+                self.page,
+                order_numbers_filter=self.order_numbers_filter,
+            )
+            return self.page
+
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.launch(
             **_chromium_launch_options(self.client.headless, self.client.slow_mo_ms)
@@ -474,16 +543,30 @@ class _FilteredOrderListSession:
         except PlaywrightTimeoutError:
             await self.client.login_client._login(self.page)
             await self.page.goto(ORDER_LIST_PRINT_WAIT_URL, wait_until="domcontentloaded", timeout=60000)
-            await self.page.wait_for_selector("#jyuchu_dlg_open", timeout=30000)
+            try:
+                await self.page.wait_for_selector("#jyuchu_dlg_open", timeout=30000)
+            except PlaywrightTimeoutError:
+                # 失敗時に着地ページの証拠(HTML/PNG)を残す。NEのbase→main移行で main への遷移が
+                # 確立できないと base に着地し #jyuchu_dlg_open が出ない（[[portal-tool-yamato-b2]] 参照）。
+                await _save_yamato_debug_artifacts(self.page, "order_list_search_button_missing")
+                raise
 
     async def __aexit__(self, exc_type, exc, tb):
         try:
-            if self.context is not None:
-                await self.context.close()
-            if self.browser is not None:
-                await self.browser.close()
-            if self.playwright is not None:
-                await self.playwright.stop()
+            if self._shared:
+                # 共有 context は閉じない。作成したページだけ閉じる。
+                if self.page is not None:
+                    try:
+                        await self.page.close()
+                    except Exception:
+                        pass
+            else:
+                if self.context is not None:
+                    await self.context.close()
+                if self.browser is not None:
+                    await self.browser.close()
+                if self.playwright is not None:
+                    await self.playwright.stop()
         finally:
             if self.storage_lock is not None:
                 self.storage_lock.__exit__(exc_type, exc, tb)
@@ -498,10 +581,12 @@ class _CustomDataDownloadSession:
         self.context = None
         self.page = None
         self.storage_lock = None
+        self._shared = False
 
     async def __aenter__(self):
-        self.storage_lock = _next_engine_storage_lock()
-        self.storage_lock.__enter__()
+        if self.client.shared_context is None:
+            self.storage_lock = _next_engine_storage_lock()
+            self.storage_lock.__enter__()
         try:
             return await self._open()
         except Exception:
@@ -509,6 +594,15 @@ class _CustomDataDownloadSession:
             raise
 
     async def _open(self):
+        if self.client.shared_context is not None:
+            # 共有 context に新ページを開くだけ（再ログイン・再起動なし）。
+            self._shared = True
+            self.context = self.client.shared_context
+            self.page = await self.context.new_page()
+            await self._goto_custom_data_download_page()
+            await self.page.wait_for_timeout(1500)
+            return self.page
+
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.launch(
             **_chromium_launch_options(self.client.headless, self.client.slow_mo_ms)
@@ -546,12 +640,19 @@ class _CustomDataDownloadSession:
 
     async def __aexit__(self, exc_type, exc, tb):
         try:
-            if self.context is not None:
-                await self.context.close()
-            if self.browser is not None:
-                await self.browser.close()
-            if self.playwright is not None:
-                await self.playwright.stop()
+            if self._shared:
+                if self.page is not None:
+                    try:
+                        await self.page.close()
+                    except Exception:
+                        pass
+            else:
+                if self.context is not None:
+                    await self.context.close()
+                if self.browser is not None:
+                    await self.browser.close()
+                if self.playwright is not None:
+                    await self.playwright.stop()
         finally:
             if self.storage_lock is not None:
                 self.storage_lock.__exit__(exc_type, exc, tb)
@@ -851,6 +952,53 @@ async def _reload_next_engine_download_page(page) -> None:
         await page.wait_for_timeout(2500)
 
 
+async def _ensure_custom_delivery_pattern_visible(page) -> None:
+    """「配送情報」フォルダを確実に展開し、子パターンが本文に現れる状態にする。
+
+    タイトルのクリックはトグルのため、可視判定→未表示ならクリック→再判定を繰り返す
+    （既に展開済みなら最初の判定で return し、無駄なクリックで畳まない）。
+    展開できないときはツリーを再読込して再試行し、最後まで駄目なら証拠を残して明示エラー。
+    """
+
+    async def pattern_visible() -> bool:
+        try:
+            return bool(
+                await page.evaluate(
+                    "(p) => document.body.innerText.includes(p)", CUSTOM_DELIVERY_PATTERN
+                )
+            )
+        except Exception:
+            return False
+
+    for _reload in range(2):
+        folder = page.locator("#tree a.dynatree-title").filter(has_text=CUSTOM_DELIVERY_FOLDER)
+        for _click in range(3):
+            if await pattern_visible():
+                return
+            if await folder.count() > 0:
+                try:
+                    await folder.first.click()
+                except Exception:
+                    pass
+            await page.wait_for_timeout(1500)
+        if await pattern_visible():
+            return
+        # 展開できない → ツリーを初期状態に戻して再試行
+        try:
+            await page.reload(wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_selector("#tree", timeout=30000)
+            await page.wait_for_timeout(1500)
+        except Exception:
+            break
+
+    if not await pattern_visible():
+        await _save_yamato_debug_artifacts(page, "custom_delivery_pattern_not_expanded")
+        raise RuntimeError(
+            "カスタムデータ作成で「配送情報」フォルダを展開できませんでした"
+            f"（パターン『{CUSTOM_DELIVERY_PATTERN}』が表示されません）。"
+        )
+
+
 async def _open_custom_shipping_download_modal(
     page,
     *,
@@ -859,12 +1007,10 @@ async def _open_custom_shipping_download_modal(
     delivery_folder = page.locator("#tree a.dynatree-title").filter(has_text=CUSTOM_DELIVERY_FOLDER)
     if await delivery_folder.count() == 0:
         raise RuntimeError("カスタムデータ作成で配送情報フォルダが見つかりません。")
-    await delivery_folder.first.click()
-    await page.wait_for_function(
-        "(pattern) => document.body.innerText.includes(pattern)",
-        arg=CUSTOM_DELIVERY_PATTERN,
-        timeout=30000,
-    )
+    # 「配送情報」フォルダのクリックはトグル（展開/折りたたみ）で、初期展開状態次第では
+    # 子パターンが表示されず wait_for_function が30秒タイムアウトしていた（実機解析で確認）。
+    # パターンが本文に現れるまでクリック展開を試み、駄目ならツリーを再読込して再試行する。
+    await _ensure_custom_delivery_pattern_visible(page)
 
     pattern = page.locator("#tree a.dynatree-title").filter(has_text=CUSTOM_DELIVERY_PATTERN)
     if await pattern.count() == 0:

@@ -75,10 +75,15 @@ async def download_yamato_invoice_batch(
     verify_statuses: bool = False,
     headless: bool | None = None,
     slow_mo_ms: int = 0,
+    client: NextEngineYamatoClient | None = None,
 ) -> InvoiceBatchDownloadResult:
     resolved_headless = _headless_default() if headless is None else headless
-    client = NextEngineYamatoClient(headless=resolved_headless, slow_mo_ms=slow_mo_ms)
-    async with client._open_filtered_order_list(
+    # client を渡すと共有セッション（1ブラウザ/1ログイン）で before_list/一括DL を実行する。
+    # 渡さなければ従来どおり自前セッションを開く（後方互換）。
+    owned_client = client or NextEngineYamatoClient(
+        headless=resolved_headless, slow_mo_ms=slow_mo_ms
+    )
+    async with owned_client._open_filtered_order_list(
         order_numbers_filter=order_numbers_filter,
     ) as page:
         before_list = await _snapshot_order_list(page)
@@ -152,6 +157,7 @@ async def download_yamato_invoice_batch(
             order_numbers_filter=order_numbers_filter,
             headless=resolved_headless,
             slow_mo_ms=slow_mo_ms,
+            client=owned_client,
         )
         if verify_statuses:
             after_statuses = await _inspect_order_statuses(
@@ -399,15 +405,16 @@ async def _download_yamato_invoice_pdf_batch(
     order_numbers_filter: tuple[str, ...],
     headless: bool,
     slow_mo_ms: int,
+    client: NextEngineYamatoClient | None = None,
 ) -> tuple[Path, tuple[str, ...]]:
     paths = find_portal_paths()
     destination_dir = paths.portal_root / "ネクストエンジン" / "ne_納品書pdf"
     destination_dir.mkdir(parents=True, exist_ok=True)
     destination = destination_dir / f"納品書_{datetime.now():%y%m%d%H%M%S}.pdf"
 
-    client = NextEngineYamatoClient(headless=headless, slow_mo_ms=slow_mo_ms)
+    used_client = client or NextEngineYamatoClient(headless=headless, slow_mo_ms=slow_mo_ms)
     dialog_messages: list[str] = []
-    async with client._open_filtered_order_list(
+    async with used_client._open_filtered_order_list(
         order_numbers_filter=order_numbers_filter,
     ) as page:
         page.on("dialog", lambda dialog: asyncio.create_task(_accept_batch_dialog(dialog, dialog_messages)))

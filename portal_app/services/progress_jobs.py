@@ -14,6 +14,10 @@ from portal_app.services.execution_logger import APP_ROOT, ExecutionLogger, exce
 
 JobWorker = Callable[[str], None]
 
+
+class JobCancelled(Exception):
+    """ユーザーが「中止」を押したことを表す。worker はこれを工程境界で送出して安全に停止する。"""
+
 # ジョブ完了/失敗の履歴を1行1JSONで追記する永続ファイル。
 # メモリ内の _jobs はプロセス終了で消えるため、「昨日の実行がどうなったか」を
 # サーバー再起動後も追えるようにする。logs/ は gitignore 済み。
@@ -61,6 +65,8 @@ class ProgressJob:
     log_dir: str | None = None
     log_events_path: str | None = None
     log_summary_path: str | None = None
+    cancel_requested: bool = False
+    stopped_at_step: str | None = None
 
 
 class ProgressJobStore:
@@ -106,7 +112,53 @@ class ProgressJobStore:
         try:
             worker(job_id)
         except Exception as exc:
-            self.fail(job_id, str(exc), error_detail=exception_payload(exc))
+            # 「中止」が要求されていれば、例外（ブラウザ強制終了によるもの等）を失敗ではなく中止として扱う。
+            if self.is_cancel_requested(job_id):
+                self.mark_cancelled(job_id)
+            else:
+                self.fail(job_id, str(exc), error_detail=exception_payload(exc))
+
+    def request_cancel(self, job_id: str) -> str | None:
+        """中止を要求する。実行中の工程ラベル（＝どこで止めたか）を返す。"""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return None
+            if job.status in {"completed", "failed", "cancelled"}:
+                return None
+            job.cancel_requested = True
+            running = next((s for s in job.steps if s.status == "running"), None)
+            job.stopped_at_step = running.label if running else None
+            label = job.stopped_at_step
+        self._write_event(job_id, "cancel_requested", status="running", detail=label)
+        return label
+
+    def is_cancel_requested(self, job_id: str) -> bool:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            return bool(job and job.cancel_requested)
+
+    def mark_cancelled(self, job_id: str, message: str | None = None) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            where = job.stopped_at_step if job else None
+            # 実行中だった工程を failed 表示にして「どこで止めたか」を明示する。
+            if job is not None:
+                for step in job.steps:
+                    if step.status == "running":
+                        step.status = "failed"
+                        step.detail = "中止"
+        msg = message or (f"「{where}」で中止しました。" if where else "処理を中止しました。")
+        self._mutate(
+            job_id,
+            status="cancelled",
+            message=msg,
+            finished_at=datetime.now().isoformat(timespec="seconds"),
+        )
+        snapshot = self.snapshot(job_id) or {}
+        self._write_event(job_id, "job_cancelled", status="cancelled", detail=msg, level="warn")
+        self._write_summary(job_id, snapshot)
+        self._append_history(job_id)
 
     def set_running(self, job_id: str, message: str) -> None:
         self._mutate(job_id, status="running", message=message)
