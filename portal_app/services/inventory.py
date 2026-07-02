@@ -10,6 +10,7 @@ import warnings
 import pandas as pd
 
 from portal_app.services.paths import PortalPaths, find_portal_paths, latest_order_csv
+from portal_app.services.master_cache import cached_by_mtime
 
 warnings.filterwarnings(
     "ignore",
@@ -114,6 +115,19 @@ def read_order_csv(path: Path) -> pd.DataFrame:
 
 
 def read_master_tables(master_book: Path) -> MasterTables:
+    cached = cached_by_mtime(
+        master_book,
+        "inventory_masters",
+        lambda: _read_master_tables_impl(master_book),
+    )
+    return MasterTables(
+        product_master=cached.product_master.copy(),
+        choice_master=cached.choice_master.copy(),
+        shimanoya_master=cached.shimanoya_master.copy(),
+    )
+
+
+def _read_master_tables_impl(master_book: Path) -> MasterTables:
     product_master = pd.read_excel(
         master_book,
         sheet_name="商品マスタ",

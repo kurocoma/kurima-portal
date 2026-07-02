@@ -14,6 +14,8 @@ import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.utils import range_boundaries
 
+from portal_app.services.master_cache import cached_by_mtime
+
 from portal_app.services.paths import PortalPaths, find_portal_paths
 
 
@@ -731,7 +733,14 @@ def load_item_name_map(paths: PortalPaths) -> tuple[dict[str, str], int, list[st
 def read_excel_table(workbook_path: Path, table_name: str) -> list[dict[str, object]]:
     if not workbook_path.is_file():
         raise FileNotFoundError(f"商品管理シートが見つかりません: {workbook_path}")
+    return cached_by_mtime(
+        workbook_path,
+        f"excel_table:{table_name}",
+        lambda: _read_excel_table_impl(workbook_path, table_name),
+    )
 
+
+def _read_excel_table_impl(workbook_path: Path, table_name: str) -> list[dict[str, object]]:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         workbook = load_workbook(workbook_path, read_only=False, data_only=True, keep_vba=False)

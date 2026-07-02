@@ -18,6 +18,7 @@ from portal_app.services.next_engine_downloader import (
     NextEngineOrderDetailDownloader,
     _chromium_launch_options,
     _headless_default,
+    _next_engine_storage_lock,
 )
 from portal_app.services.paths import find_portal_paths
 
@@ -262,35 +263,36 @@ async def upload_next_engine_shipment_csv(
         headless=_headless_default() if headless is None else headless,
         slow_mo_ms=slow_mo_ms,
     )
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(
-            **_chromium_launch_options(login_client.headless, slow_mo_ms)
-        )
-        try:
-            context_kwargs: dict[str, object] = {
-                "accept_downloads": True,
-                "locale": "ja-JP",
-                "viewport": {"width": 1366, "height": 900},
-            }
-            if STORAGE_STATE_PATH.exists():
-                context_kwargs["storage_state"] = str(STORAGE_STATE_PATH)
-            context = await browser.new_context(**context_kwargs)
+    with _next_engine_storage_lock():
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(
+                **_chromium_launch_options(login_client.headless, slow_mo_ms)
+            )
             try:
-                page = await context.new_page()
-                await login_client._login(page)
-                await page.goto(NEXT_ENGINE_SHIPMENT_UPLOAD_URL, wait_until="domcontentloaded", timeout=60000)
-                await page.locator('input[type="file"][name="_n_file"], input[name="_n_file"]').set_input_files(
-                    str(preview.upload_csv)
-                )
-                await _click_upload_button(page)
-                await page.wait_for_load_state("domcontentloaded", timeout=60000)
-                await page.wait_for_timeout(1500)
-                confirmation_text = await _page_text_excerpt(page)
-                await context.storage_state(path=str(STORAGE_STATE_PATH))
+                context_kwargs: dict[str, object] = {
+                    "accept_downloads": True,
+                    "locale": "ja-JP",
+                    "viewport": {"width": 1366, "height": 900},
+                }
+                if STORAGE_STATE_PATH.exists():
+                    context_kwargs["storage_state"] = str(STORAGE_STATE_PATH)
+                context = await browser.new_context(**context_kwargs)
+                try:
+                    page = await context.new_page()
+                    await login_client._login(page)
+                    await page.goto(NEXT_ENGINE_SHIPMENT_UPLOAD_URL, wait_until="domcontentloaded", timeout=60000)
+                    await page.locator('input[type="file"][name="_n_file"], input[name="_n_file"]').set_input_files(
+                        str(preview.upload_csv)
+                    )
+                    await _click_upload_button(page)
+                    await page.wait_for_load_state("domcontentloaded", timeout=60000)
+                    await page.wait_for_timeout(1500)
+                    confirmation_text = await _page_text_excerpt(page)
+                    await context.storage_state(path=str(STORAGE_STATE_PATH))
+                finally:
+                    await context.close()
             finally:
-                await context.close()
-        finally:
-            await browser.close()
+                await browser.close()
 
     result = _replace_upload_result(
         preview,

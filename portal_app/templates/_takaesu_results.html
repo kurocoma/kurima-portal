@@ -1,0 +1,120 @@
+{# 高江洲発注明細の結果セクション（base継承なしのfragment）。
+   GET /inventory/preview?tab=takaesu から遅延ロードされ、POST応答では {% include %} で再利用する。
+   preview_error は /inventory/preview の例外時のみ設定（include 時は未定義=非表示）。 #}
+{% if preview_error %}
+  <div class="note error">
+    <div class="note-title">高江洲発注明細を読み込めませんでした</div>
+    <p>{{ preview_error }}</p>
+  </div>
+{% endif %}
+{% if takaesu_result and takaesu_sheet %}
+  <div class="result-bar">
+    <span class="tag-ok">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2f7d57" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+      {% if takaesu_download_result %}高江洲発注書を作成しました{% else %}高江洲発注明細を表示しました{% endif %}
+    </span>
+    {% if takaesu_result.captured_at %}<span class="result-sub">{{ takaesu_result.captured_at.strftime("%Y-%m-%d %H:%M") }} 時点</span>{% endif %}
+    <a class="result-reset" href="/inventory?tab=takaesu">再表示</a>
+  </div>
+
+  {% if takaesu_sheet.warnings %}
+    <div class="note warn mt-14">
+      <div class="note-title">確認事項</div>
+      <ul class="note-list">
+        {% for warning in takaesu_sheet.warnings %}<li>{{ warning }}</li>{% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+
+  <div class="summary mt-14">
+    <div class="summary-card">
+      <div class="summary-k">CSV行数</div>
+      <div class="summary-v">{{ takaesu_sheet.source_rows }}</div>
+    </div>
+    <div class="summary-card">
+      <div class="summary-k">通常商品</div>
+      <div class="summary-v">{{ takaesu_sheet.normal_rows }} <span class="unit">件</span></div>
+    </div>
+    <div class="summary-card">
+      <div class="summary-k">選べるセット</div>
+      <div class="summary-v">{{ takaesu_sheet.choice_rows }} <span class="unit">件</span></div>
+    </div>
+    <div class="summary-card{% if takaesu_sheet.warnings %} warn{% endif %}">
+      <div class="summary-k">発注書</div>
+      <div class="summary-v{% if not takaesu_sheet.warnings %} calm{% endif %}">{{ takaesu_sheet.output_rows }} <span class="unit">行</span></div>
+    </div>
+  </div>
+
+  {% if takaesu_sheet.output_csv or takaesu_download_ready %}
+    <div class="btn-row">
+      <a class="btn" href="/inventory/takaesu/download"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>高江洲発注書CSV</a>
+      <a class="btn" href="/inventory/takaesu/download/pdf"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>高江洲発注書PDF</a>
+    </div>
+  {% endif %}
+
+  {% if takaesu_download_result %}
+    <details class="fold mt-14">
+      <summary>取得の詳細<span class="fold-hint">開閉</span></summary>
+      <div class="fold-body">
+        <dl class="kv narrow">
+          <dt>実行モード</dt>
+          <dd>{% if takaesu_browser_mode|default("background") == "front" %}画面表示 / slow_mo_ms={{ takaesu_slow_mo_ms|default(150) }}{% else %}バックグラウンド{% endif %}</dd>
+          <dt>保存ファイル</dt>
+          <dd class="mono">{{ takaesu_download_result.downloaded_file }}</dd>
+          <dt>元ファイル名</dt>
+          <dd>{{ takaesu_download_result.source_filename }}</dd>
+          <dt>処理日時</dt>
+          <dd>{{ takaesu_download_result.captured_at.strftime("%Y-%m-%d %H:%M:%S") }}</dd>
+        </dl>
+      </div>
+    </details>
+  {% endif %}
+
+  <details class="fold mt-14">
+    <summary>集計条件・ファイル<span class="fold-hint">開閉</span></summary>
+    <div class="fold-body">
+      <dl class="kv narrow">
+        <dt>受注明細CSV</dt>
+        <dd class="mono">{{ takaesu_sheet.source_csv }}</dd>
+        <dt>CSV行数</dt>
+        <dd>{{ takaesu_sheet.source_rows }}</dd>
+        <dt>商品マスタ</dt>
+        <dd class="mono">{{ takaesu_sheet.master_book }}</dd>
+        <dt>高江洲ブック</dt>
+        <dd class="mono">{{ takaesu_sheet.order_workbook }}</dd>
+        <dt>発注書CSV</dt>
+        <dd class="mono">{% if takaesu_sheet.output_csv %}{{ takaesu_sheet.output_csv }}{% else %}未作成{% endif %}</dd>
+      </dl>
+    </div>
+  </details>
+
+  <section class="mt-26">
+    <div class="sec-head">
+      <h2>高江洲発注書</h2>
+      <span class="badge">{{ takaesu_sheet.output_rows }} 行</span>
+    </div>
+    <div class="tbl-wrap">
+      <div class="tbl-scroll">
+        <table class="tbl tbl-min-760">
+          <thead>
+            <tr><th>JANコード</th><th>仕入先CD</th><th>商品名</th><th class="num">発注数</th><th class="num">受注数</th><th>備考</th></tr>
+          </thead>
+          <tbody>
+            {% for row in takaesu_sheet.preview_rows %}
+              <tr>
+                <td class="mono">{{ row["JANコード"] }}</td>
+                <td class="mono">{{ row["仕入先CD"] }}</td>
+                <td>{{ row["商品名"] }}</td>
+                <td class="num">{{ row["発注数"] }}</td>
+                <td class="num">{{ row["受注数"] }}</td>
+                <td>{{ row["備考"] }}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="6" class="empty">対象データなし</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+{% endif %}

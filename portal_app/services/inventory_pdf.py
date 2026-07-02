@@ -80,6 +80,69 @@ def inventory_choice_result_to_pdf(result: InventoryResult) -> bytes:
     return inventory_result_to_pdf(result, "choice")
 
 
+TAKAESU_PDF_HEADERS = ("JANコード", "仕入先CD", "商品名", "発注数", "受注数", "備考")
+TAKAESU_PDF_NUMERIC = {"発注数", "受注数"}
+
+
+def takaesu_order_sheet_to_pdf(rows: list[dict[str, object]]) -> bytes:
+    """高江洲発注書（JANコード/仕入先CD/商品名/発注数/受注数/備考）をPDF化する。
+
+    rows は preview_takaesu_order_sheet 等が返す dict レコード列（列順に依存せず
+    ヘッダーのキーで参照する）。
+    """
+    _register_fonts()
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        rightMargin=16 * mm,
+        leftMargin=16 * mm,
+        topMargin=14 * mm,
+        bottomMargin=14 * mm,
+        title="高江洲発注書",
+    )
+    styles = _styles()
+    data: list[list[object]] = [
+        [Paragraph(_escaped(header), styles["header"]) for header in TAKAESU_PDF_HEADERS]
+    ]
+    row_list = list(rows or [])
+    if row_list:
+        for row in row_list:
+            data.append(
+                [
+                    Paragraph(
+                        _escaped(row.get(header, "")),
+                        styles["cell_right"] if header in TAKAESU_PDF_NUMERIC else styles["cell"],
+                    )
+                    for header in TAKAESU_PDF_HEADERS
+                ]
+            )
+    else:
+        data.append([Paragraph("対象データなし", styles["cell"])] + [""] * (len(TAKAESU_PDF_HEADERS) - 1))
+
+    col_widths = (90, 70, doc.width - 90 - 70 - 70 - 70 - 150, 70, 70, 150)
+    style_commands: list[tuple] = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f4e79")),
+        ("BACKGROUND", (0, 1), (-1, -1), colors.white),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f9fafb")]),
+        ("BOX", (0, 0), (-1, -1), 0.4, colors.HexColor("#cbd5e1")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#e2e8f0")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("ALIGN", (3, 1), (4, -1), "RIGHT"),
+    ]
+    if not row_list:
+        style_commands.append(("SPAN", (0, 1), (-1, 1)))
+
+    table = Table(data, colWidths=col_widths, repeatRows=1, splitByRow=True)
+    table.setStyle(TableStyle(style_commands))
+    doc.build([table], onFirstPage=_draw_footer, onLaterPages=_draw_footer)
+    return buffer.getvalue()
+
+
 def _register_fonts() -> None:
     if JP_FONT not in pdfmetrics.getRegisteredFontNames():
         pdfmetrics.registerFont(UnicodeCIDFont(JP_FONT))

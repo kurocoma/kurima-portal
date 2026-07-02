@@ -15,11 +15,13 @@ from portal_app.services.next_engine_downloader import (
     NextEngineOrderDetailDownloader,
     _chromium_launch_options,
     _headless_default,
+    _next_engine_storage_lock,
 )
 from portal_app.services.paths import PortalPaths, find_portal_paths
 
 
 ORDER_LIST_PRINT_WAIT_URL = "https://main.next-engine.com/Userjyuchu/index?search_condi=17"
+ORDER_DETAIL_LIST_URL = "https://main.next-engine.com/Userjyuchumeisai"
 CUSTOM_DATA_DOWNLOAD_URL = "https://odd.next-engine.com/download.html"
 YAMATO_SHIPPING_OPTIONS = [
     "20 : ヤマト(発払い)B2v6",
@@ -256,16 +258,17 @@ class NextEngineYamatoClient:
                 "dataヤマト",
                 ".csv",
             )
-            async with page.expect_download(timeout=90000) as download_info:
-                await page.locator("#searchJyuchu_table_dl_lnk").click()
-            download = await download_info.value
-            await download.save_as(str(destination))
+            source_filename = await _download_ne_csv_from_current_page(
+                page,
+                destination,
+                debug_label="yamato_buyer_download",
+            )
 
             result = YamatoBuyerDownloadResult(
                 executed=True,
                 snapshot=snapshot,
                 downloaded_file=destination,
-                source_filename=download.suggested_filename,
+                source_filename=source_filename,
                 audit_path=YAMATO_AUDIT_LOG_PATH,
                 skipped_reason=None,
             )
@@ -315,17 +318,17 @@ class NextEngineYamatoClient:
                 "dataヤマト",
                 ".csv",
             )
-            await meisai_page.wait_for_selector("#searchJyuchu_table_dl_lnk", timeout=60000)
-            async with meisai_page.expect_download(timeout=90000) as download_info:
-                await meisai_page.locator("#searchJyuchu_table_dl_lnk").click()
-            download = await download_info.value
-            await download.save_as(str(destination))
+            source_filename = await _download_ne_csv_from_current_page(
+                meisai_page,
+                destination,
+                debug_label="yamato_product_download",
+            )
 
             result = YamatoProductDownloadResult(
                 executed=True,
                 snapshot=snapshot,
                 downloaded_file=destination,
-                source_filename=download.suggested_filename,
+                source_filename=source_filename,
                 audit_path=YAMATO_AUDIT_LOG_PATH,
                 skipped_reason=None,
                 output_type=output_type,
@@ -427,8 +430,18 @@ class _FilteredOrderListSession:
         self.browser = None
         self.context = None
         self.page = None
+        self.storage_lock = None
 
     async def __aenter__(self):
+        self.storage_lock = _next_engine_storage_lock()
+        self.storage_lock.__enter__()
+        try:
+            return await self._open()
+        except Exception:
+            await self.__aexit__(None, None, None)
+            raise
+
+    async def _open(self):
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.launch(
             **_chromium_launch_options(self.client.headless, self.client.slow_mo_ms)
@@ -464,12 +477,17 @@ class _FilteredOrderListSession:
             await self.page.wait_for_selector("#jyuchu_dlg_open", timeout=30000)
 
     async def __aexit__(self, exc_type, exc, tb):
-        if self.context is not None:
-            await self.context.close()
-        if self.browser is not None:
-            await self.browser.close()
-        if self.playwright is not None:
-            await self.playwright.stop()
+        try:
+            if self.context is not None:
+                await self.context.close()
+            if self.browser is not None:
+                await self.browser.close()
+            if self.playwright is not None:
+                await self.playwright.stop()
+        finally:
+            if self.storage_lock is not None:
+                self.storage_lock.__exit__(exc_type, exc, tb)
+                self.storage_lock = None
 
 
 class _CustomDataDownloadSession:
@@ -479,8 +497,18 @@ class _CustomDataDownloadSession:
         self.browser = None
         self.context = None
         self.page = None
+        self.storage_lock = None
 
     async def __aenter__(self):
+        self.storage_lock = _next_engine_storage_lock()
+        self.storage_lock.__enter__()
+        try:
+            return await self._open()
+        except Exception:
+            await self.__aexit__(None, None, None)
+            raise
+
+    async def _open(self):
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.launch(
             **_chromium_launch_options(self.client.headless, self.client.slow_mo_ms)
@@ -517,12 +545,17 @@ class _CustomDataDownloadSession:
                 raise
 
     async def __aexit__(self, exc_type, exc, tb):
-        if self.context is not None:
-            await self.context.close()
-        if self.browser is not None:
-            await self.browser.close()
-        if self.playwright is not None:
-            await self.playwright.stop()
+        try:
+            if self.context is not None:
+                await self.context.close()
+            if self.browser is not None:
+                await self.browser.close()
+            if self.playwright is not None:
+                await self.playwright.stop()
+        finally:
+            if self.storage_lock is not None:
+                self.storage_lock.__exit__(exc_type, exc, tb)
+                self.storage_lock = None
 
 
 async def _filter_yamato_shipping_methods(
@@ -621,6 +654,52 @@ async def _click_search(page) -> None:
     raise RuntimeError("受注伝票管理の検索ボタンが見つかりません。")
 
 
+async def _find_open_next_engine_main_page(context):
+    for candidate in reversed(context.pages):
+        try:
+            if not candidate.is_closed() and "main.next-engine.com" in candidate.url:
+                await candidate.bring_to_front()
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
+async def _open_next_engine_main_from_base(page):
+    if "base.next-engine.org" not in page.url:
+        return page
+
+    main_page = await _find_open_next_engine_main_page(page.context)
+    if main_page is not None:
+        return main_page
+
+    launch_locator = page.locator(
+        'a[href*="/apps/launch/?id=274908"], a[href*="/apps/launch"][target="base_app_1"]'
+    )
+    launch = await _first_visible_locator(launch_locator, timeout=10000)
+    if launch is None:
+        return page
+
+    before_pages = set(page.context.pages)
+    await launch.click(force=True, timeout=15000)
+    await page.wait_for_timeout(2500)
+
+    for candidate in reversed(page.context.pages):
+        if candidate in before_pages:
+            continue
+        try:
+            if candidate.is_closed():
+                continue
+            await candidate.wait_for_load_state("domcontentloaded", timeout=60000)
+            await candidate.bring_to_front()
+            return candidate
+        except Exception:
+            continue
+
+    main_page = await _find_open_next_engine_main_page(page.context)
+    return main_page or page
+
+
 async def _open_meisai_page(
     page,
     snapshot: YamatoOrderListSnapshot,
@@ -656,7 +735,18 @@ async def _open_meisai_page(
         await page.locator("#btn_meisai_exec").click()
     meisai_page = await new_page_info.value
     await meisai_page.wait_for_load_state("domcontentloaded", timeout=60000)
-    await meisai_page.wait_for_selector("#searchJyuchu_table_dl_lnk", timeout=60000)
+    if "base.next-engine.org" in meisai_page.url:
+        meisai_page = await _open_next_engine_main_from_base(meisai_page)
+        if "base.next-engine.org" in meisai_page.url:
+            try:
+                if meisai_page is not page:
+                    await meisai_page.close()
+            except Exception:
+                pass
+            meisai_page = await _open_next_engine_main_from_base(page)
+        await meisai_page.goto(ORDER_DETAIL_LIST_URL, wait_until="domcontentloaded", timeout=60000)
+        await meisai_page.wait_for_timeout(2500)
+    meisai_page = await _wait_for_meisai_download_link(meisai_page)
     return meisai_page
 
 
@@ -664,6 +754,101 @@ def _validate_meisai_output_type(output_type: str) -> None:
     if output_type not in MEISAI_OUTPUT_TYPES:
         allowed = ", ".join(sorted(MEISAI_OUTPUT_TYPES))
         raise ValueError(f"明細一覧の出力タイプが不正です: {output_type}。allowed={allowed}")
+
+
+async def _wait_for_meisai_download_link(page):
+    for attempt in range(1, 4):
+        if "base.next-engine.org" in page.url:
+            try:
+                page = await _open_next_engine_main_from_base(page)
+                await page.goto(ORDER_DETAIL_LIST_URL, wait_until="domcontentloaded", timeout=60000)
+                await page.wait_for_timeout(2500)
+            except Exception:
+                pass
+        locator = page.locator("#searchJyuchu_table_dl_lnk")
+        if await _is_visible(locator, timeout=20000):
+            return page
+        if attempt < 3:
+            await _reload_next_engine_download_page(page)
+
+    screenshot, html = await _save_yamato_debug_artifacts(page, "yamato_meisai_download_link_missing")
+    title = await _safe_page_title(page)
+    excerpt = await _safe_page_excerpt(page)
+    raise RuntimeError(
+        "Next Engine detail-list download link was not visible. "
+        f"url={page.url} title={title} screenshot={screenshot} html={html} body_excerpt={excerpt}"
+    )
+
+
+async def _download_ne_csv_from_current_page(page, destination: Path, *, debug_label: str) -> str | None:
+    locator = page.locator("#searchJyuchu_table_dl_lnk")
+    last_error = ""
+    for attempt in range(1, 4):
+        await _prepare_next_engine_download_click(page)
+        visible_locator = await _first_visible_locator(locator, timeout=20000)
+        if visible_locator is None:
+            last_error = "download_link_not_visible"
+            if attempt < 3:
+                await _reload_next_engine_download_page(page)
+                continue
+            break
+
+        try:
+            async with page.expect_download(timeout=60000) as download_info:
+                await visible_locator.click(force=True)
+            download = await download_info.value
+            await download.save_as(str(destination))
+            return download.suggested_filename
+        except PlaywrightTimeoutError as exc:
+            last_error = f"download_timeout:{exc}"
+            if attempt < 3:
+                await _reload_next_engine_download_page(page)
+                continue
+            break
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}:{exc}"
+            if attempt < 3:
+                await _reload_next_engine_download_page(page)
+                continue
+            break
+
+    screenshot, html = await _save_yamato_debug_artifacts(page, f"{debug_label}_failed")
+    title = await _safe_page_title(page)
+    excerpt = await _safe_page_excerpt(page)
+    raise RuntimeError(
+        "Next Engine CSV download did not start. "
+        f"label={debug_label} url={page.url} title={title} last_error={last_error} "
+        f"screenshot={screenshot} html={html} body_excerpt={excerpt}"
+    )
+
+
+async def _prepare_next_engine_download_click(page) -> None:
+    try:
+        await page.keyboard.press("Escape")
+    except Exception:
+        pass
+    try:
+        await page.evaluate(
+            """
+            () => {
+              document
+                .querySelectorAll(".modal-backdrop, #cm-ov, #cc--main, .bootbox, .popover, .tooltip")
+                .forEach((element) => element.remove());
+              document.body.classList.remove("modal-open");
+            }
+            """
+        )
+    except Exception:
+        pass
+    await page.wait_for_timeout(500)
+
+
+async def _reload_next_engine_download_page(page) -> None:
+    try:
+        await page.reload(wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_timeout(2500)
+    except Exception:
+        await page.wait_for_timeout(2500)
 
 
 async def _open_custom_shipping_download_modal(
@@ -810,12 +995,56 @@ def _next_home_file_path(
     raise RuntimeError("保存ファイル名を決定できませんでした。")
 
 
-async def _save_yamato_debug_artifacts(page, label: str) -> None:
+async def _is_visible(locator, *, timeout: int) -> bool:
+    return await _first_visible_locator(locator, timeout=timeout) is not None
+
+
+async def _first_visible_locator(locator, *, timeout: int):
+    try:
+        count = await locator.count()
+        if count <= 1:
+            return locator if await locator.is_visible(timeout=timeout) else None
+        for index in range(count):
+            candidate = locator.nth(index)
+            if await candidate.is_visible(timeout=500):
+                return candidate
+    except PlaywrightTimeoutError:
+        return None
+    except Exception:
+        return None
+    return None
+
+
+async def _safe_page_title(page) -> str:
+    try:
+        return await page.title()
+    except Exception:
+        return ""
+
+
+async def _safe_page_excerpt(page) -> str:
+    try:
+        text = await page.locator("body").inner_text(timeout=3000)
+    except Exception:
+        return ""
+    return " ".join(text.split())[:500]
+
+
+async def _save_yamato_debug_artifacts(page, label: str) -> tuple[Path | None, Path | None]:
     YAMATO_AUDIT_LOG_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%y%m%d%H%M%S")
     base = YAMATO_AUDIT_LOG_DIR / f"{label}_{timestamp}"
-    await page.screenshot(path=str(base.with_suffix(".png")), full_page=True)
-    base.with_suffix(".html").write_text(await page.content(), encoding="utf-8")
+    screenshot_path: Path | None = base.with_suffix(".png")
+    html_path: Path | None = base.with_suffix(".html")
+    try:
+        await page.screenshot(path=str(screenshot_path), full_page=True)
+    except Exception:
+        screenshot_path = None
+    try:
+        html_path.write_text(await page.content(), encoding="utf-8")
+    except Exception:
+        html_path = None
+    return screenshot_path, html_path
 
 
 def _append_audit(result: YamatoBuyerDownloadResult) -> None:

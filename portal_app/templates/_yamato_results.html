@@ -1,0 +1,236 @@
+{# ヤマト伝票の結果セクション（base継承なしのfragment）。
+   GET /yamato/preview から遅延ロードされ、POST応答では {% include %} で再利用する。
+   preview_error は /yamato/preview の例外時のみ設定（include 時は未定義=非表示）。 #}
+{% if preview_error %}
+  <div class="note error">
+    <div class="note-title">最新データを読み込めませんでした</div>
+    <p>{{ preview_error }}</p>
+  </div>
+{% endif %}
+{% if message or result or prepare_result or b2_import_result or restore_result %}
+  <div class="result-bar">
+    {% if message %}
+      <span class="tag-ok">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2f7d57" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+        実行しました
+      </span>
+      <span class="result-sub">{{ message }}</span>
+    {% elif result %}
+      <span style="font-size:15px;font-weight:700;">最新の変換データ</span>
+      <span class="result-sub">保存済みCSVのプレビューです</span>
+    {% endif %}
+    <a class="result-reset" href="/yamato">再読込</a>
+  </div>
+
+  {% if prepare_result and prepare_result.consistency_warnings %}
+    <div class="note warn mt-14">
+      <div class="note-title">確認事項</div>
+      <ul class="note-list">
+        {% for w in prepare_result.consistency_warnings %}<li>{{ w }}</li>{% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+
+  {% if result %}
+    <div class="summary mt-14">
+      <div class="summary-card">
+        <div class="summary-k">出力件数</div>
+        <div class="summary-v">{{ result.output_rows }} <span class="unit">件</span></div>
+      </div>
+      <div class="summary-card">
+        <div class="summary-k">住所 自動補正</div>
+        <div class="summary-v">{{ result.address_adjusted_rows }} <span class="unit">件</span></div>
+      </div>
+      <div class="summary-card{% if result.address_review_rows %} warn{% endif %}">
+        <div class="summary-k">住所 要確認</div>
+        <div class="summary-v">{{ result.address_review_rows }} <span class="unit">件</span></div>
+      </div>
+      <div class="summary-card">
+        <div class="summary-k">重複除外</div>
+        <div class="summary-v">{{ result.duplicate_rows_removed }} <span class="unit">件</span></div>
+      </div>
+    </div>
+
+    {% if result.output_csv %}
+      {% set out_name = (result.output_csv|string).replace('\\', '/').split('/')|last %}
+      <div class="filecard">
+        <span class="file-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#147f9f" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></span>
+        <div class="file-body">
+          <div class="file-name">{{ out_name }}</div>
+          <div class="file-path">{{ result.output_csv }}</div>
+        </div>
+      </div>
+    {% endif %}
+
+    {% set need_reviews = (result.address_reviews or []) | selectattr('requires_review') | list %}
+    {% if need_reviews %}
+      <section class="review">
+        <div class="review-head">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#9a6a1a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
+          <h2 class="review-title">確認が必要な住所（{{ need_reviews|length }}件）</h2>
+          <span class="review-hint">内容を直してから再作成してください</span>
+        </div>
+        <div class="review-scroll">
+          <table class="tbl tbl-min-680">
+            <thead>
+              <tr><th>状態</th><th>伝票番号</th><th>宛名</th><th>住所</th><th>確認内容</th></tr>
+            </thead>
+            <tbody>
+              {% for item in need_reviews %}
+                <tr>
+                  <td><span class="tag-need">要確認</span></td>
+                  <td class="mono">{{ item.order_no }}</td>
+                  <td>{{ item.destination_name }}</td>
+                  <td>{{ item.adjusted_address }}</td>
+                  <td class="cell-need">{{ item.reasons|join(' / ') }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    {% endif %}
+  {% endif %}
+
+  {% if restore_result %}
+    <section class="review mt-14" style="background:var(--surface);border-color:var(--line);">
+      <div class="review-head" style="border-bottom-color:var(--line-soft);">
+        <h2 class="review-title" style="color:var(--text);">納品書印刷待ちへの復旧結果</h2>
+        <span class="review-hint">{% if restore_result.executed %}実行しました{% else %}確認のみ{% endif %}{% if restore_result.failed_order_numbers %} ・ 失敗 {{ restore_result.failed_order_numbers|join(', ') }}{% endif %}</span>
+      </div>
+      <div class="review-scroll">
+        <table class="tbl tbl-min-560">
+          <thead>
+            <tr><th>伝票番号</th><th>復旧前</th><th>復旧後</th><th>結果</th></tr>
+          </thead>
+          <tbody>
+            {% for item in restore_result.results %}
+              {% set final = item.after_restore or item.after_clear or item.before %}
+              <tr>
+                <td class="mono">{{ item.order_no }}</td>
+                <td>{{ item.before.status_text }}</td>
+                <td>{{ final.status_text }}</td>
+                <td>{% if item.skipped_reason %}{{ item.skipped_reason }}{% elif item.changed %}変更{% else %}変更なし{% endif %}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="4" class="empty">対象がありません。</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  {% endif %}
+
+  {% if b2_import_result %}
+    <details class="fold mt-14"{% if b2_import_result.skipped_reason or b2_import_result.warnings %} open{% endif %}>
+      <summary>B2取込の結果<span class="fold-hint">開閉</span></summary>
+      <div class="fold-body">
+        <dl class="kv narrow">
+          <dt>ステップ</dt>
+          <dd>{{ b2_import_result.step }}</dd>
+          <dt>取込CSV</dt>
+          <dd class="mono">{{ b2_import_result.csv_file }}</dd>
+          <dt>行数</dt>
+          <dd>{{ b2_import_result.source_rows }}件</dd>
+          <dt>実取込</dt>
+          <dd>{% if b2_import_result.import_executed %}実行済み{% else %}未実行{% endif %}</dd>
+          <dt>状態</dt>
+          <dd>{{ b2_import_result.skipped_reason or "確認済み" }}</dd>
+          {% if b2_import_result.page_url %}<dt>画面URL</dt><dd class="mono">{{ b2_import_result.page_url }}</dd>{% endif %}
+          {% if b2_import_result.audit_path %}<dt>監査ログ</dt><dd class="mono">{{ b2_import_result.audit_path }}</dd>{% endif %}
+        </dl>
+        {% if b2_import_result.warnings %}
+          <ul class="note-list" style="color:var(--warn);margin-top:12px;">
+            {% for w in b2_import_result.warnings %}<li>{{ w }}</li>{% endfor %}
+          </ul>
+        {% endif %}
+      </div>
+    </details>
+  {% endif %}
+
+  {% if result and result.address_reviews %}
+    <details class="fold mt-14" style="overflow:hidden;">
+      <summary>住所補正の結果（全{{ result.address_reviews|length }}件）<span class="fold-hint">開閉</span></summary>
+      <div class="fold-table-body">
+        <table class="tbl tbl-min-760">
+          <thead>
+            <tr><th>状態</th><th>伝票番号</th><th>宛名</th><th>補正後 住所</th><th>建物名</th><th>理由</th></tr>
+          </thead>
+          <tbody>
+            {% for item in result.address_reviews %}
+              <tr{% if item.requires_review %} class="row-need"{% endif %}>
+                <td><span class="{% if item.requires_review %}tag-need{% else %}tag-auto{% endif %}">{% if item.requires_review %}要確認{% else %}自動補正{% endif %}</span></td>
+                <td class="mono">{{ item.order_no }}</td>
+                <td>{{ item.destination_name }}</td>
+                <td>{{ item.adjusted_address }}</td>
+                <td>{{ item.adjusted_building }}</td>
+                <td>{{ item.reasons|join(' / ') }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  {% endif %}
+
+  {% if result %}
+    <details class="fold mt-14" style="overflow:hidden;">
+      <summary>変換プレビュー（{{ result.preview_rows|length }}件表示）<span class="fold-hint">開閉</span></summary>
+      <div class="fold-table-body">
+        <table class="tbl tbl-min-600">
+          <thead>
+            <tr>
+              {% if result.preview_rows %}
+                {% for column in result.preview_rows[0].keys() %}<th>{{ column }}</th>{% endfor %}
+              {% endif %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in result.preview_rows %}
+              <tr>{% for value in row.values() %}<td>{{ value }}</td>{% endfor %}</tr>
+            {% else %}
+              <tr><td class="empty">表示するデータがありません。</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  {% endif %}
+
+  {% if prepare_result %}
+    <details class="fold mt-14">
+      <summary>ネクストエンジン取得の詳細<span class="fold-hint">開閉</span></summary>
+      <div class="fold-body">
+        <dl class="kv narrow">
+          <dt>購入者データ</dt>
+          <dd>{% if prepare_result.buyer %}{{ prepare_result.buyer.snapshot.count }}件{% else %}未実行{% endif %}</dd>
+          <dt>商品情報データ</dt>
+          <dd>{% if prepare_result.product %}{{ prepare_result.product.snapshot.count }}件{% else %}未実行{% endif %}</dd>
+          <dt>納品書PDF</dt>
+          <dd>{% if prepare_result.invoice %}{{ prepare_result.invoice.before_list.count }}件{% if prepare_result.invoice.skipped_reason %} / {{ prepare_result.invoice.skipped_reason }}{% endif %}{% else %}未実行{% endif %}</dd>
+          <dt>配送情報CSV</dt>
+          <dd class="mono">{% if prepare_result.custom_shipping %}{% if prepare_result.custom_shipping.downloaded_file %}{{ prepare_result.custom_shipping.downloaded_file }}{% elif prepare_result.custom_shipping.skipped_reason %}{{ prepare_result.custom_shipping.skipped_reason }}{% else %}確認済{% endif %}{% else %}未実行{% endif %}</dd>
+          <dt>B2取込CSV</dt>
+          <dd class="mono">{% if prepare_result.conversion and prepare_result.conversion.output_csv %}{{ prepare_result.conversion.output_csv }}{% else %}未作成{% endif %}</dd>
+          <dt>監査ログ</dt>
+          <dd class="mono">{{ prepare_result.audit_path }}</dd>
+        </dl>
+      </div>
+    </details>
+  {% endif %}
+
+  {% if result %}
+    <details class="fold mt-14">
+      <summary>実行ログ（ファイルパス・監査ログ）<span class="fold-hint">開閉</span></summary>
+      <div class="fold-body">
+        <dl class="kv narrow">
+          {% if result.source_csv %}<dt>変換元CSV</dt><dd class="mono">{{ result.source_csv }}</dd>{% endif %}
+          {% if result.master_book %}<dt>商品マスタ</dt><dd class="mono">{{ result.master_book }}</dd>{% endif %}
+          {% if result.output_csv %}<dt>出力CSV</dt><dd class="mono">{{ result.output_csv }}</dd>{% endif %}
+          {% if result.audit_path %}<dt>変換 監査ログ</dt><dd class="mono">{{ result.audit_path }}</dd>{% endif %}
+          {% if prepare_result and prepare_result.audit_path %}<dt>準備 監査ログ</dt><dd class="mono">{{ prepare_result.audit_path }}</dd>{% endif %}
+        </dl>
+      </div>
+    </details>
+  {% endif %}
+{% endif %}

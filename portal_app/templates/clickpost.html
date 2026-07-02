@@ -1,216 +1,182 @@
-﻿{% extends "base.html" %}
+{% extends "base.html" %}
 {% block title %}クリックポスト - くりまポータルツール{% endblock %}
 {% block content %}
-<section class="section">
-  <div class="section-head">
-    <div>
-      <p class="eyebrow">ClickPost</p>
-      <h1>クリックポスト</h1>
+<div class="page-head">
+  <h1 class="page-title">クリックポスト</h1>
+  <svg class="page-wave" width="62" height="8" viewBox="0 0 62 8" fill="none"><path d="M2 5C8 1.5 13 1.5 19 5s11 3.5 17 0 11-3.5 17 0 5 1 5 1" stroke="#3bb0d4" stroke-width="2" stroke-linecap="round"/></svg>
+  <p class="page-lead">印刷待ちの対象から申込データとレターパックPDFを作成し、発送まで進めます。</p>
+</div>
+
+{% if error %}
+  <div class="note error">
+    <div class="note-title">処理が止まりました</div>
+    <p>{{ error }}</p>
+  </div>
+{% endif %}
+
+<section class="panel{% if error %} mt-14{% endif %}">
+  <h2 class="panel-title">クリックポスト処理を進める</h2>
+  <p class="panel-lead">この操作で、下記の流れを順に実行します。</p>
+  <div class="flow">
+    <span class="flow-chip" data-chip="1"><span class="flow-num">1</span>NE取得</span>
+    <span class="flow-chip" data-chip="2"><span class="flow-num">2</span>申込データ作成</span>
+    <span class="flow-chip" data-chip="3"><span class="flow-num">3</span>レターパックPDF</span>
+    <span class="flow-chip" data-chip="4"><span class="flow-num">4</span>クリックポスト取込</span>
+    <span class="flow-chip" data-chip="5"><span class="flow-num">5</span>決済</span>
+    <span class="flow-chip" data-chip="6"><span class="flow-num">6</span>送り状取得</span>
+  </div>
+
+  <form method="post" action="/clickpost/full-run/start" data-progress-form data-progress-endpoint="/clickpost/full-run/start">
+    <label class="opt mt-20" style="align-items:center;">
+      <input type="checkbox" name="confirm_execute" required>
+      <span style="font-size:13px;color:var(--text-2);line-height:1.6;">クリックポストへの取込・決済・送り状取得まで実行することを確認しました。</span>
+    </label>
+
+    <div class="cta-wrap">
+      <button class="btn-cta" type="submit">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 4 20 12 6 20 6 4"/></svg>
+        クリックポスト処理を進める
+      </button>
+      <span class="run-note">所要 約5〜8分・完了後に送り状PDFを保存します</span>
     </div>
-    <div class="action-row">
-      <a class="button" href="/clickpost">再読み込み</a>
-      <form class="inline-form" method="post" action="/clickpost/create-csv-upload-check" data-progress-form data-progress-endpoint="/clickpost/create-csv-upload-check/start">
-        <button class="button" type="submit">CSV作成＋アップロード前チェック</button>
+
+    <details class="adv-fold">
+      <summary>
+        <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#a79c8f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+        詳細設定（通常は変更不要）
+      </summary>
+      <div class="adv-body">
+        <div class="field-row">
+          <label class="field">
+            <span class="field-label">実行モード</span>
+            <select class="select" name="browser_mode">
+              <option value="front" selected>画面を表示</option>
+              <option value="background">バックグラウンド</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">最大決済件数</span>
+            <input class="input w-120" type="number" name="max_payments" value="20" min="1" max="100" step="1">
+          </label>
+          <input type="hidden" name="slow_mo_ms" value="{{ slow_mo_ms|default(150) }}">
+        </div>
+      </div>
+    </details>
+  </form>
+</section>
+
+<details class="fold mt-14">
+  <summary>
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#a79c8f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+    個別に行う（その他の操作）
+    <span class="fold-hint">開閉</span>
+  </summary>
+  <div class="fold-body">
+    <p class="maint-note">途中の工程だけをやり直したいときに使います。通常は上の「まとめて進める」だけで完了します。</p>
+
+    <div class="op-row">
+      <div class="op-main">
+        <strong class="op-name">NE取得＋申込データ作成</strong>
+        <span class="op-desc">最新データを取り込み、申込CSVとレターパック住所を作成</span>
+      </div>
+      <form class="op-form" method="post" action="/clickpost/prepare" data-progress-form data-progress-endpoint="/clickpost/prepare/start">
+        <input type="hidden" name="browser_mode" value="background">
+        <input type="hidden" name="slow_mo_ms" value="0">
+        <button class="btn btn-sm" type="submit">実行</button>
+      </form>
+    </div>
+
+    <div class="op-row">
+      <div class="op-main">
+        <strong class="op-name">レターパックPDFを作成</strong>
+        <span class="op-desc">作成済みの住所データから宛名PDFを作成</span>
+      </div>
+      <form class="op-form" method="post" action="/clickpost/create-letterpack-pdf" data-progress-form data-progress-endpoint="/clickpost/create-letterpack-pdf/start">
+        <button class="btn btn-sm" type="submit">実行</button>
+      </form>
+    </div>
+
+    <div class="op-row" style="flex-wrap:wrap;">
+      <div class="op-main">
+        <strong class="op-name">クリックポスト取込・決済・送り状取得</strong>
+        <span class="op-desc">作成済みCSVを取り込み、決済して送り状を保存します（実データに反映）</span>
+      </div>
+      <form class="op-form" method="post" action="/clickpost/import-payment-print/start" data-progress-form data-progress-endpoint="/clickpost/import-payment-print/start" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <input type="hidden" name="browser_mode" value="front">
+        <input type="hidden" name="slow_mo_ms" value="150">
+        <input type="hidden" name="max_payments" value="20">
+        <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--warn);font-weight:600;white-space:nowrap;">
+          <input type="checkbox" name="confirm_execute" required style="accent-color:var(--primary);">決済まで実行
+        </label>
+        <button class="btn btn-sm" type="submit">実行</button>
+      </form>
+    </div>
+
+    <div class="op-row">
+      <div class="op-main">
+        <strong class="op-name">申込データ作成＋取込前チェック</strong>
+        <span class="op-desc">取込前に件数と内容だけ確認（取込はしない）</span>
+      </div>
+      <form class="op-form" method="post" action="/clickpost/create-csv-upload-check" data-progress-form data-progress-endpoint="/clickpost/create-csv-upload-check/start">
+        <button class="btn btn-sm" type="submit">実行</button>
       </form>
     </div>
   </div>
+</details>
 
-  {% if error %}
-    <div class="status-panel error">
-      <h2>エラー</h2>
-      <p>{{ error }}</p>
+<div id="progress-panel" class="progress-panel" hidden>
+  <div class="progress-head">
+    <div>
+      <h2 id="progress-title">処理状況</h2>
+      <p id="progress-message" class="progress-message">開始待ちです。</p>
     </div>
-  {% endif %}
-
-  {% if message %}
-    <div class="status-panel ok">
-      <h2>作成完了</h2>
-      <p>{{ message }}</p>
-    </div>
-  {% endif %}
-
-  <div class="status-panel run-panel full-run-panel">
-    <h2>3処理まとめ実行</h2>
-    <form class="stack-form" method="post" action="/clickpost/full-run/start" data-progress-form data-progress-endpoint="/clickpost/full-run/start">
-      <div class="primary-run">
-        <button class="button danger run-button full-run-button" type="submit">NEダウンロード・レターパックPDF・クリックポスト本番処理</button>
-        {% if result %}
-          <span class="badge">ClickPost {{ result.target_rows }}件</span>
-        {% endif %}
-      </div>
-
-      <label class="check-field confirm-field">
-        <input type="checkbox" name="confirm_execute" required>
-        <span>3処理を連続実行し、クリックポストへ実インポート、決済、PDF保存、送り状番号CSV/Excel反映まで実行します</span>
-      </label>
-
-      <fieldset class="mode-toggle">
-        <legend>実行モード</legend>
-        <label>
-          <input type="radio" name="browser_mode" value="background">
-          <span>バックグラウンド</span>
-        </label>
-        <label>
-          <input type="radio" name="browser_mode" value="front" checked>
-          <span>フロント表示</span>
-        </label>
-      </fieldset>
-
-      <details class="settings-details">
-        <summary>詳細設定</summary>
-        <div class="settings-body">
-          <div class="form-grid clickpost-live-control-grid">
-            <label>
-              <span>slow_mo_ms</span>
-              <input type="number" name="slow_mo_ms" value="{{ slow_mo_ms|default(150) }}" min="0" step="50">
-            </label>
-            <label>
-              <span>最大決済件数</span>
-              <input type="number" name="max_payments" value="20" min="1" max="100" step="1">
-            </label>
-          </div>
-        </div>
-      </details>
-    </form>
+    <span id="progress-status" class="badge">待機中</span>
   </div>
+  <ol id="progress-steps" class="progress-steps"></ol>
+  <dl id="progress-result" class="progress-result" hidden></dl>
+  <p id="progress-error" class="progress-error" hidden></p>
+</div>
 
-  <div class="status-panel run-panel">
-    <h2>NEダウンロード</h2>
-    <form class="stack-form" method="post" action="/clickpost/prepare" data-progress-form data-progress-endpoint="/clickpost/prepare/start">
-      <div class="primary-run">
-        <button class="button primary run-button" type="submit">NE取得 + CSV作成</button>
-        {% if result %}
-          <span class="badge">ClickPost {{ result.target_rows }}件</span>
-        {% endif %}
-      </div>
-
-      <fieldset class="mode-toggle">
-        <legend>実行モード</legend>
-        <label>
-          <input type="radio" name="browser_mode" value="background" {% if browser_mode|default("background") != "front" %}checked{% endif %}>
-          <span>バックグラウンド</span>
-        </label>
-        <label>
-          <input type="radio" name="browser_mode" value="front" {% if browser_mode|default("background") == "front" %}checked{% endif %}>
-          <span>フロント表示</span>
-        </label>
-      </fieldset>
-
-      <details class="settings-details">
-        <summary>詳細設定</summary>
-        <div class="settings-body">
-          <div class="form-grid clickpost-control-grid">
-            <label>
-              <span>slow_mo_ms</span>
-              <input type="number" name="slow_mo_ms" value="{{ slow_mo_ms|default(150) }}" min="0" step="50">
-            </label>
-          </div>
-        </div>
-      </details>
-    </form>
+{% if message %}
+  <div class="result-bar">
+    <span class="tag-ok">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2f7d57" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+      完了しました
+    </span>
+    <span class="result-sub">{{ message }}</span>
   </div>
+{% endif %}
 
-  <div class="status-panel run-panel live-run-panel">
-    <h2>クリックポスト本番処理</h2>
-    <form class="stack-form" method="post" action="/clickpost/import-payment-print/start" data-progress-form data-progress-endpoint="/clickpost/import-payment-print/start">
-      <div class="primary-run">
-        <button class="button danger run-button" type="submit">CSVインポート・決済・送り状取得</button>
-        {% if result %}
-          <span class="badge">ClickPost {{ result.target_rows }}件</span>
-        {% endif %}
-      </div>
-
-      <label class="check-field confirm-field">
-        <input type="checkbox" name="confirm_execute" required>
-        <span>クリックポストへ実インポートし、決済、PDF保存、送り状番号CSV/Excel反映まで実行します</span>
-      </label>
-
-      <fieldset class="mode-toggle">
-        <legend>実行モード</legend>
-        <label>
-          <input type="radio" name="browser_mode" value="background">
-          <span>バックグラウンド</span>
-        </label>
-        <label>
-          <input type="radio" name="browser_mode" value="front" checked>
-          <span>フロント表示</span>
-        </label>
-      </fieldset>
-
-      <details class="settings-details">
-        <summary>詳細設定</summary>
-        <div class="settings-body">
-          <div class="form-grid clickpost-live-control-grid">
-            <label>
-              <span>slow_mo_ms</span>
-              <input type="number" name="slow_mo_ms" value="{{ slow_mo_ms|default(150) }}" min="0" step="50">
-            </label>
-            <label>
-              <span>最大決済件数</span>
-              <input type="number" name="max_payments" value="20" min="1" max="100" step="1">
-            </label>
-          </div>
-        </div>
-      </details>
-    </form>
-  </div>
-
-  <div class="status-panel run-panel">
-    <h2>レターパックPDF作成</h2>
-    <form class="stack-form" method="post" action="/clickpost/create-letterpack-pdf" data-progress-form data-progress-endpoint="/clickpost/create-letterpack-pdf/start">
-      <div class="primary-run">
-        <button class="button primary run-button" type="submit">レターパックPDF作成</button>
-        {% if letterpack_pdf_result and letterpack_pdf_result.output_pdf %}
-          <span class="badge">{{ letterpack_pdf_result.output_rows }}件</span>
-        {% endif %}
-      </div>
-    </form>
-  </div>
-
-  <div id="progress-panel" class="status-panel progress-panel" hidden>
-    <div class="progress-head">
-      <div>
-        <h2 id="progress-title">処理状況</h2>
-        <p id="progress-message" class="progress-message">開始待ちです。</p>
-      </div>
-      <span id="progress-status" class="badge">待機中</span>
-    </div>
-    <ol id="progress-steps" class="progress-steps"></ol>
-    <dl id="progress-result" class="meta-grid progress-result" hidden></dl>
-    <p id="progress-error" class="progress-error" hidden></p>
-  </div>
-
-  {% if prepare_result %}
-    <div class="status-panel {% if prepare_result.consistency_warnings %}warn{% else %}ok{% endif %}">
-      <h2>NE取得結果</h2>
-      <dl class="meta-grid">
+{% if prepare_result %}
+  <details class="fold mt-14"{% if prepare_result.consistency_warnings %} open{% endif %}>
+    <summary>NE取得結果<span class="fold-hint">開閉</span></summary>
+    <div class="fold-body">
+      <dl class="kv narrow">
         <dt>実行モード</dt>
-        <dd>{% if browser_mode|default("background") == "front" %}フロント表示{% else %}バックグラウンド{% endif %}</dd>
+        <dd>{% if browser_mode|default("background") == "front" %}画面表示{% else %}バックグラウンド{% endif %}</dd>
         <dt>購入者データ</dt>
-        <dd>{% if prepare_result.buyer and prepare_result.buyer.downloaded_file %}{{ prepare_result.buyer.downloaded_file }}{% else %}未取得{% endif %}</dd>
-        <dt>購入者対象</dt>
-        <dd>{% if prepare_result.buyer %}{{ prepare_result.buyer.snapshot.count }} 件{% else %}-{% endif %}</dd>
+        <dd>{% if prepare_result.buyer %}{{ prepare_result.buyer.snapshot.count }} 件{% else %}未取得{% endif %}</dd>
         <dt>受注明細データ</dt>
-        <dd>{% if prepare_result.product and prepare_result.product.downloaded_file %}{{ prepare_result.product.downloaded_file }}{% else %}未取得{% endif %}</dd>
-        <dt>受注明細対象</dt>
-        <dd>{% if prepare_result.product %}{{ prepare_result.product.snapshot.count }} 件{% else %}-{% endif %}</dd>
+        <dd>{% if prepare_result.product %}{{ prepare_result.product.snapshot.count }} 件{% else %}未取得{% endif %}</dd>
+        <dt>納品書PDF</dt>
+        <dd>{% if prepare_result.invoice %}{{ prepare_result.invoice.before_list.count }} 件{% if prepare_result.invoice.restored %} / 復旧済み{% endif %}{% else %}未取得{% endif %}</dd>
       </dl>
       {% if prepare_result.consistency_warnings %}
-        <ul class="compact-list warning-list">
-          {% for warning in prepare_result.consistency_warnings %}
-            <li>{{ warning }}</li>
-          {% endfor %}
+        <ul class="note-list" style="color:var(--warn);margin-top:10px;">
+          {% for warning in prepare_result.consistency_warnings %}<li>{{ warning }}</li>{% endfor %}
         </ul>
       {% endif %}
     </div>
-  {% endif %}
+  </details>
+{% endif %}
 
-  {% if upload_result %}
-    <div class="status-panel {% if upload_result.ready_for_payment %}ok{% else %}warn{% endif %}">
-      <h2>アップロード前チェック</h2>
-      <dl class="meta-grid">
+{% if upload_result %}
+  <details class="fold mt-14"{% if not upload_result.ready_for_payment %} open{% endif %}>
+    <summary>アップロード前チェック<span class="fold-hint">開閉</span></summary>
+    <div class="fold-body">
+      <dl class="kv narrow">
         <dt>CSV</dt>
-        <dd>{{ upload_result.csv_file }}</dd>
+        <dd class="mono">{{ upload_result.csv_file }}</dd>
         <dt>対象行数</dt>
         <dd>{{ upload_result.target_rows }} 件</dd>
         <dt>実アップロード</dt>
@@ -218,27 +184,25 @@
         <dt>状態</dt>
         <dd>{{ upload_result.skipped_reason or "確認済み" }}</dd>
       </dl>
-      {% if upload_result.warning_text %}
-        <p>{{ upload_result.warning_text }}</p>
-      {% endif %}
+      {% if upload_result.warning_text %}<p style="margin-top:10px;color:var(--warn);font-size:13px;">{{ upload_result.warning_text }}</p>{% endif %}
     </div>
-  {% endif %}
+  </details>
+{% endif %}
 
-  {% if letterpack_pdf_result %}
-    <div class="status-panel {% if letterpack_pdf_result.output_pdf %}ok{% else %}warn{% endif %}">
-      <h2>レターパック宛名PDF</h2>
-      <dl class="meta-grid">
+{% if letterpack_pdf_result %}
+  <details class="fold mt-14">
+    <summary>レターパック宛名PDF<span class="fold-hint">開閉</span></summary>
+    <div class="fold-body">
+      <dl class="kv narrow">
         <dt>住所CSV</dt>
-        <dd>{{ letterpack_pdf_result.address_csv }}</dd>
+        <dd class="mono">{{ letterpack_pdf_result.address_csv }}</dd>
         <dt>PDF</dt>
-        <dd>{% if letterpack_pdf_result.output_pdf %}{{ letterpack_pdf_result.output_pdf }}{% else %}未作成{% endif %}</dd>
+        <dd class="mono">{% if letterpack_pdf_result.output_pdf %}{{ letterpack_pdf_result.output_pdf }}{% else %}未作成{% endif %}</dd>
         {% if letterpack_pdf_download_url %}
-          <dt>PDFダウンロード</dt>
+          <dt>ダウンロード</dt>
           <dd class="link-actions">
             <a class="text-link" href="{{ letterpack_pdf_download_url }}">ダウンロード</a>
-            {% if letterpack_pdf_open_url %}
-              <a class="text-link" href="{{ letterpack_pdf_open_url }}" target="_blank" rel="noopener">ブラウザで開く</a>
-            {% endif %}
+            {% if letterpack_pdf_open_url %}<a class="text-link" href="{{ letterpack_pdf_open_url }}" target="_blank" rel="noopener">ブラウザで開く</a>{% endif %}
           </dd>
         {% endif %}
         <dt>出力件数</dt>
@@ -246,81 +210,23 @@
         <dt>ページ数</dt>
         <dd>{{ letterpack_pdf_result.page_count }}</dd>
         <dt>監査ログ</dt>
-        <dd>{{ letterpack_pdf_result.audit_path }}</dd>
+        <dd class="mono">{{ letterpack_pdf_result.audit_path }}</dd>
       </dl>
       {% if letterpack_pdf_result.warnings %}
-        <ul class="compact-list warning-list">
-          {% for warning in letterpack_pdf_result.warnings %}
-            <li>{{ warning }}</li>
-          {% endfor %}
+        <ul class="note-list" style="color:var(--warn);margin-top:10px;">
+          {% for warning in letterpack_pdf_result.warnings %}<li>{{ warning }}</li>{% endfor %}
         </ul>
       {% endif %}
     </div>
-  {% endif %}
+  </details>
+{% endif %}
 
-  {% if result %}
-    <div class="status-panel {% if result.warnings %}warn{% else %}ok{% endif %}">
-      <h2>変換概要</h2>
-      <dl class="meta-grid">
-        <dt>購入者CSV</dt>
-        <dd>{{ result.buyer_csv }}</dd>
-        <dt>商品情報CSV</dt>
-        <dd>{{ result.product_csv }}</dd>
-        <dt>購入者行数</dt>
-        <dd>{{ result.buyer_rows }}</dd>
-        <dt>商品情報行数</dt>
-        <dd>{{ result.product_rows }}</dd>
-        <dt>対象行数</dt>
-        <dd>{{ result.target_rows }}</dd>
-        <dt>出力CSV</dt>
-        <dd>{% if result.output_csv %}{{ result.output_csv }}{% else %}未作成{% endif %}</dd>
-        <dt>監査ログ</dt>
-        <dd>{% if result.audit_path %}{{ result.audit_path }}{% else %}未記録{% endif %}</dd>
-      </dl>
-      {% if result.warnings %}
-        <ul class="compact-list warning-list">
-          {% for warning in result.warnings %}
-            <li>{{ warning }}</li>
-          {% endfor %}
-        </ul>
-      {% endif %}
-    </div>
-  {% endif %}
-</section>
-
-{% if result %}
-<section class="section data-section">
-  <div class="table-head">
-    <h2>CSVプレビュー</h2>
-    <span class="badge">{{ result.preview_rows|length }} 件表示</span>
+{% if defer_preview %}
+  <div class="lazy-slot" data-lazy="/clickpost/preview">
+    <span class="lazy-spinner" aria-hidden="true"></span>最新の申込データを読み込み中…
   </div>
-  <div class="table-wrap">
-    <table class="wide-table">
-      <thead>
-        <tr>
-          {% if result.preview_rows %}
-            {% for column in result.preview_rows[0].keys() %}
-              <th>{{ column }}</th>
-            {% endfor %}
-          {% endif %}
-        </tr>
-      </thead>
-      <tbody>
-        {% for row in result.preview_rows %}
-          <tr>
-            {% for value in row.values() %}
-              <td>{{ value }}</td>
-            {% endfor %}
-          </tr>
-        {% else %}
-          <tr>
-            <td class="empty">表示するデータがありません。</td>
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</section>
+{% else %}
+  {% include "_clickpost_results.html" %}
 {% endif %}
 <script>
 (() => {
@@ -332,6 +238,38 @@
   const resultList = document.getElementById("progress-result");
   const errorBox = document.getElementById("progress-error");
   const forms = document.querySelectorAll("[data-progress-form]");
+
+  // 進捗ステップ key を上部フローチップ(1..6)へ対応付け、実行中ステップのチップを点滅させる。
+  const flowChips = [...document.querySelectorAll(".flow [data-chip]")];
+  const STEP_CHIP = {
+    buyer_download: 1, product_download: 1, invoice_download: 1,
+    create_csv: 2, clickpost_csv: 2, letterpack_csv: 2,
+    letterpack_pdf: 3,
+    precheck: 4, login: 4, csv_import: 4, upload_check: 4,
+    payment: 5,
+    print_pdf: 6, tracking_export: 6,
+  };
+  const clearFlowChips = () => {
+    for (const chip of flowChips) chip.classList.remove("is-active", "is-done", "is-failed");
+  };
+  const updateFlowChips = (job) => {
+    const byChip = {};
+    for (const step of job.steps || []) {
+      const n = STEP_CHIP[step.key];
+      if (!n) continue;
+      (byChip[n] = byChip[n] || []).push(step.status);
+    }
+    for (const chip of flowChips) {
+      const n = Number(chip.dataset.chip);
+      const st = byChip[n] || [];
+      chip.classList.remove("is-active", "is-done", "is-failed");
+      if (!st.length) continue;
+      if (st.includes("failed")) chip.classList.add("is-failed");
+      else if (st.includes("running")) chip.classList.add("is-active");
+      else if (st.every((s) => s === "completed")) chip.classList.add("is-done");
+      else if (st.includes("completed")) chip.classList.add("is-active");
+    }
+  };
 
   const statusLabels = {
     queued: "待機中",
@@ -458,6 +396,8 @@
 
     errorBox.hidden = !job.error;
     errorBox.textContent = job.error || "";
+
+    updateFlowChips(job);
   };
 
   const pushJobLogRows = (rows, job) => {
@@ -489,7 +429,9 @@
   };
 
   const showError = (error) => {
+    clearFlowChips();
     panel.hidden = false;
+    panel.classList.remove("ok", "warn");
     panel.classList.add("error");
     title.textContent = "処理状況";
     message.textContent = "進捗表示でエラーが発生しました。";
@@ -509,6 +451,9 @@
         form.submit();
         return;
       }
+      // fetch に FormData を渡すと multipart になりサーバーの parse_qs が読めないため、
+      // ボタン無効化の「前」に URLSearchParams(urlencoded) として本文を構築する。
+      const body = new URLSearchParams(new FormData(form, event.submitter));
       for (const button of document.querySelectorAll("[data-progress-form] button")) {
         button.disabled = true;
       }
@@ -521,7 +466,7 @@
       try {
         const response = await fetch(endpoint, {
           method: "POST",
-          body: new FormData(form)
+          body
         });
         if (!response.ok) {
           throw new Error("処理を開始できませんでした。");

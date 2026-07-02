@@ -14,6 +14,7 @@ from portal_app.services.next_engine_downloader import (
     NextEngineOrderDetailDownloader,
     _chromium_launch_options,
     _headless_default,
+    _next_engine_storage_lock,
 )
 from portal_app.services.next_engine_order_status import (
     ORDER_INPUT_URL,
@@ -345,50 +346,51 @@ async def _download_invoice_pdf(
         slow_mo_ms=slow_mo_ms,
     )
 
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(
-            **_chromium_launch_options(headless, slow_mo_ms)
-        )
-        try:
-            context_kwargs: dict[str, object] = {
-                "accept_downloads": True,
-                "locale": "ja-JP",
-                "viewport": {"width": 1400, "height": 900},
-            }
-            if STORAGE_STATE_PATH.exists():
-                context_kwargs["storage_state"] = str(STORAGE_STATE_PATH)
-            context = await browser.new_context(**context_kwargs)
+    with _next_engine_storage_lock():
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(
+                **_chromium_launch_options(headless, slow_mo_ms)
+            )
             try:
-                page = await context.new_page()
-                page.on("dialog", lambda dialog: asyncio.create_task(dialog.accept()))
-                await login_client._login(page)
-                await page.goto(
-                    ORDER_LIST_PRINT_WAIT_URL,
-                    wait_until="domcontentloaded",
-                    timeout=60000,
-                )
-                await page.wait_for_selector(
-                    f'input[name="qid[]"][value="{order_no}"]',
-                    timeout=30000,
-                )
-                await page.wait_for_timeout(1500)
+                context_kwargs: dict[str, object] = {
+                    "accept_downloads": True,
+                    "locale": "ja-JP",
+                    "viewport": {"width": 1400, "height": 900},
+                }
+                if STORAGE_STATE_PATH.exists():
+                    context_kwargs["storage_state"] = str(STORAGE_STATE_PATH)
+                context = await browser.new_context(**context_kwargs)
+                try:
+                    page = await context.new_page()
+                    page.on("dialog", lambda dialog: asyncio.create_task(dialog.accept()))
+                    await login_client._login(page)
+                    await page.goto(
+                        ORDER_LIST_PRINT_WAIT_URL,
+                        wait_until="domcontentloaded",
+                        timeout=60000,
+                    )
+                    await page.wait_for_selector(
+                        f'input[name="qid[]"][value="{order_no}"]',
+                        timeout=30000,
+                    )
+                    await page.wait_for_timeout(1500)
 
-                await _select_only_order(page, order_no)
-                await page.locator(INVOICE_ACTION_ID).click()
-                await page.wait_for_selector(INVOICE_DOWNLOAD_BUTTON_ID, timeout=30000)
-                await _set_invoice_options(page)
+                    await _select_only_order(page, order_no)
+                    await page.locator(INVOICE_ACTION_ID).click()
+                    await page.wait_for_selector(INVOICE_DOWNLOAD_BUTTON_ID, timeout=30000)
+                    await _set_invoice_options(page)
 
-                async with page.expect_download(timeout=120000) as download_info:
-                    await page.locator(INVOICE_DOWNLOAD_BUTTON_ID).click()
-                download = await download_info.value
-                await download.save_as(str(destination))
-                await context.storage_state(path=str(STORAGE_STATE_PATH))
-                await page.wait_for_timeout(3000)
-                return destination
+                    async with page.expect_download(timeout=120000) as download_info:
+                        await page.locator(INVOICE_DOWNLOAD_BUTTON_ID).click()
+                    download = await download_info.value
+                    await download.save_as(str(destination))
+                    await context.storage_state(path=str(STORAGE_STATE_PATH))
+                    await page.wait_for_timeout(3000)
+                    return destination
+                finally:
+                    await context.close()
             finally:
-                await context.close()
-        finally:
-            await browser.close()
+                await browser.close()
 
 
 async def _download_yamato_invoice_pdf_batch(
@@ -465,37 +467,38 @@ async def _inspect_order_statuses(
         slow_mo_ms=slow_mo_ms,
     )
     snapshots: list[OrderStatusSnapshot] = []
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(
-            **_chromium_launch_options(headless, slow_mo_ms)
-        )
-        try:
-            context_kwargs: dict[str, object] = {
-                "accept_downloads": True,
-                "locale": "ja-JP",
-                "viewport": {"width": 1400, "height": 900},
-            }
-            if STORAGE_STATE_PATH.exists():
-                context_kwargs["storage_state"] = str(STORAGE_STATE_PATH)
-            context = await browser.new_context(**context_kwargs)
+    with _next_engine_storage_lock():
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(
+                **_chromium_launch_options(headless, slow_mo_ms)
+            )
             try:
-                page = await context.new_page()
-                await login_client._login(page)
-                for order_no in order_numbers:
-                    await page.goto(
-                        ORDER_INPUT_URL.format(order_no=order_no),
-                        wait_until="domcontentloaded",
-                        timeout=60000,
-                    )
-                    await page.wait_for_selector("#jyuchu_denpyo_no", timeout=30000)
-                    await page.wait_for_selector("#jyuchu_jyotai_kbn", timeout=30000)
-                    await page.wait_for_selector("#chk_kakunin_check_kbn", timeout=30000)
-                    snapshots.append(await _snapshot_order_page(page))
-                await context.storage_state(path=str(STORAGE_STATE_PATH))
+                context_kwargs: dict[str, object] = {
+                    "accept_downloads": True,
+                    "locale": "ja-JP",
+                    "viewport": {"width": 1400, "height": 900},
+                }
+                if STORAGE_STATE_PATH.exists():
+                    context_kwargs["storage_state"] = str(STORAGE_STATE_PATH)
+                context = await browser.new_context(**context_kwargs)
+                try:
+                    page = await context.new_page()
+                    await login_client._login(page)
+                    for order_no in order_numbers:
+                        await page.goto(
+                            ORDER_INPUT_URL.format(order_no=order_no),
+                            wait_until="domcontentloaded",
+                            timeout=60000,
+                        )
+                        await page.wait_for_selector("#jyuchu_denpyo_no", timeout=30000)
+                        await page.wait_for_selector("#jyuchu_jyotai_kbn", timeout=30000)
+                        await page.wait_for_selector("#chk_kakunin_check_kbn", timeout=30000)
+                        snapshots.append(await _snapshot_order_page(page))
+                    await context.storage_state(path=str(STORAGE_STATE_PATH))
+                finally:
+                    await context.close()
             finally:
-                await context.close()
-        finally:
-            await browser.close()
+                await browser.close()
     return tuple(snapshots)
 
 

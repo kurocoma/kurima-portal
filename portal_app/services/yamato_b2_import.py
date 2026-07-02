@@ -362,7 +362,9 @@ async def _run_browser_step(
             await context.storage_state(path=str(storage_state))
 
             if step in {"open_import_page", "select_file_dry_run", "execute_import"}:
-                page, ready_to_import = await _open_import_page(page, warnings=warnings)
+                page, ready_to_import = await _open_import_page(
+                    page, login_id=login_id, password=password, warnings=warnings
+                )
                 if not ready_to_import:
                     skipped_reason = "import_page_not_confirmed"
                 else:
@@ -504,11 +506,14 @@ async def _capture_b2_debug_state(page, step: str, *, warnings: list[str]) -> di
     }
 
 
-async def _login_to_b2(page, *, login_id: str, password: str, warnings: list[str]) -> None:
-    await page.goto(_yamato_b2_url(), wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(1000)
-    await _follow_meta_refresh_if_present(page)
-    await page.wait_for_timeout(1000)
+async def _login_to_b2(
+    page, *, login_id: str, password: str, warnings: list[str], skip_initial_goto: bool = False
+) -> None:
+    if not skip_initial_goto:
+        await page.goto(_yamato_b2_url(), wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_timeout(1000)
+        await _follow_meta_refresh_if_present(page)
+        await page.wait_for_timeout(1000)
     if _is_b2_system_error_url(page.url):
         warnings.append("B2の入口URLがシステムエラー画面だったため、ログイン入口へ切り替えました。")
         await page.goto(DEFAULT_YAMATO_B2_MEMBER_LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
@@ -602,7 +607,78 @@ async def _follow_meta_refresh_if_present(page) -> None:
     await page.goto(refresh_url, wait_until="domcontentloaded", timeout=60000)
 
 
-async def _open_import_page(page, *, warnings: list[str]):
+async def _click_b2_error_login_link(page, *, warnings: list[str]) -> bool:
+    """system_error 画面の「ログイン画面へ」(a#login, href=javascript::) を押してメンバーズログインへ遷移する。
+
+    システムエラーを抜けられたら True を返す。
+    """
+    for selector in ("a#login", "#login", "a.w200#login", "a:has-text('ログイン画面へ')"):
+        try:
+            locator = page.locator(selector).first
+            if await locator.count() == 0:
+                continue
+            await locator.click(timeout=5000)
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=60000)
+            except PlaywrightTimeoutError:
+                pass
+            await page.wait_for_timeout(2000)
+            await _follow_meta_refresh_if_present(page)
+            if not _is_b2_system_error_url(page.url):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _retry_b2_system_error(
+    page, *, login_id: str, password: str, warnings: list[str], attempts: int = 3
+):
+    """B2クラウドがシステムエラー画面(system_error.html)を返したときに復帰を試みる。
+
+    復帰経路: エラー画面の「ログイン画面へ」(a#login)を押す → メンバーズログイン → 再ログイン → B2クラウドへ入り直す。
+    システムエラーでなければ即座に何もせず返す（正常系は no-op）。
+    """
+    for index in range(1, attempts + 1):
+        if not _is_b2_system_error_url(page.url):
+            return page
+        warnings.append(
+            f"B2システムエラー画面を検出（再試行 {index}/{attempts}）。『ログイン画面へ』から再ログインします。"
+        )
+        await page.wait_for_timeout(2000)
+        moved = await _click_b2_error_login_link(page, warnings=warnings)
+        try:
+            # moved=True ならメンバーズログイン画面に居るので入口gotoを省略してそのフォームを使う。
+            await _login_to_b2(
+                page,
+                login_id=login_id,
+                password=password,
+                warnings=warnings,
+                skip_initial_goto=moved,
+            )
+        except Exception as exc:
+            warnings.append(f"B2再ログインに失敗（再試行 {index}）: {exc}")
+            if moved:
+                # 直接クリック経路が失敗したら、入口からの通常ログインでフォールバック。
+                try:
+                    await _login_to_b2(
+                        page, login_id=login_id, password=password, warnings=warnings
+                    )
+                except Exception as exc2:
+                    warnings.append(f"B2再ログイン(入口経由)も失敗: {exc2}")
+                    continue
+            else:
+                continue
+        page = await _enter_b2_cloud(page, warnings=warnings)
+    if _is_b2_system_error_url(page.url):
+        warnings.append(
+            "B2クラウドのシステムエラーが解消しませんでした。時間をおいて再実行してください。"
+        )
+    return page
+
+
+async def _enter_and_locate_import_page(page, *, warnings: list[str]):
+    """B2クラウドへ入り、外部データ取込画面まで遷移する。到達できたら (page, True)。"""
     page = await _enter_b2_cloud(page, warnings=warnings)
     if await _is_import_page(page):
         return page, True
@@ -625,6 +701,24 @@ async def _open_import_page(page, *, warnings: list[str]):
             continue
         await page.wait_for_timeout(1200)
         if await _is_import_page(page):
+            return page, True
+    return page, False
+
+
+async def _open_import_page(page, *, login_id: str, password: str, warnings: list[str]):
+    page, ok = await _enter_and_locate_import_page(page, warnings=warnings)
+    if ok:
+        return page, True
+
+    # 取込画面に到達できず、B2クラウドがシステムエラー(useServiceのybmContextRoot未定義等で system_error.html)に
+    # 落ちた場合は、「ログイン画面へ」→再ログイン→B2クラウド入り直し で復帰し、もう一度だけ取込画面遷移を試す。
+    # （再ログイン後はページが初期化され直り useService が通る、というユーザー確認済みの手動復帰経路を自動化）
+    if _is_b2_system_error_url(page.url):
+        page = await _retry_b2_system_error(
+            page, login_id=login_id, password=password, warnings=warnings
+        )
+        page, ok = await _enter_and_locate_import_page(page, warnings=warnings)
+        if ok:
             return page, True
 
     warnings.append("B2取込画面への遷移候補をクリックできませんでした。保存HTMLでセレクタ確認が必要です。")
@@ -748,6 +842,19 @@ async def _enter_b2_cloud(page, *, warnings: list[str]):
     if await _is_b2_cloud_page(page):
         return page
 
+    # 送り状発行システムB2クラウドへは sendToSpecified(sendTo=2) のURLで遷移する。
+    # 旧来の ybmCommonJs.useService('06') は現行のメンバーズ画面で ybmContextRoot 未定義となり失敗する
+    # （メニューがJS動的生成でリンク/グローバルが揃わない）ため、URLベースのサービス入口を優先する。
+    try:
+        await page.goto(_yamato_b2_url(), wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_timeout(2000)
+        await _follow_meta_refresh_if_present(page)
+        await page.wait_for_timeout(1500)
+        if await _is_b2_cloud_page(page):
+            return page
+    except Exception as exc:
+        warnings.append(f"B2クラウド入口(sendToSpecified)への遷移に失敗: {exc}")
+
     if await _page_contains_any(page, ("このサービスを利用する", "送り状発行システムB2クラウド"), timeout=2000):
         try:
             page = await _evaluate_with_optional_popup(
@@ -834,7 +941,11 @@ async def _cancel_popup_wait(popup_task) -> None:
 
 
 async def _is_b2_cloud_page(page) -> bool:
-    return "newb2web.kuronekoyamato.co.jp" in page.url
+    # system_error.html も同一ドメインのため、エラー画面を「B2クラウド到達」と誤認しないよう除外する。
+    return (
+        "newb2web.kuronekoyamato.co.jp" in page.url
+        and not _is_b2_system_error_url(page.url)
+    )
 
 
 def _is_b2_system_error_url(url: str | None) -> bool:

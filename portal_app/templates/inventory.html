@@ -1,132 +1,260 @@
 {% extends "base.html" %}
 {% block title %}在庫明細確認 - くりまポータルツール{% endblock %}
 {% block content %}
-<section class="section">
-  <div class="section-head">
-    <div>
-      <p class="eyebrow">Inventory</p>
-      <h1>在庫明細確認</h1>
-    </div>
-    <div class="action-row">
-      <a class="button" href="/inventory">再読込</a>
-      <form class="inline-form" method="post" action="/inventory/fetch-next-engine">
-        <button class="button primary" type="submit">Next Engine取得</button>
-      </form>
-      {% if result %}
-        <a class="button" href="/inventory/download/normal">通常CSV</a>
-        <a class="button" href="/inventory/download/choice">選べるCSV</a>
-        <a class="button primary" href="/inventory/download/pdf/normal">通常商品PDF</a>
-        <a class="button primary" href="/inventory/download/pdf/choice">選べるセットPDF</a>
-      {% endif %}
-    </div>
+<div class="page-head">
+  <h1 class="page-title">在庫明細確認</h1>
+  <svg class="page-wave" width="62" height="8" viewBox="0 0 62 8" fill="none"><path d="M2 5C8 1.5 13 1.5 19 5s11 3.5 17 0 11-3.5 17 0 5 1 5 1" stroke="#3bb0d4" stroke-width="2" stroke-linecap="round"/></svg>
+  <p class="page-lead">最新の受注明細を取り込み、発注確認用の集計を表示します。</p>
+</div>
+
+{% if error %}
+  <div class="note error">
+    <div class="note-title">処理が止まりました</div>
+    <p>{{ error }}</p>
+  </div>
+{% endif %}
+
+{% set current_tab = active_tab|default("normal") %}
+<nav class="tabbar" aria-label="在庫明細確認の種類">
+  <a class="tablink{% if current_tab == 'normal' %} is-active{% endif %}" href="/inventory">通常の明細</a>
+  <a class="tablink{% if current_tab == 'takaesu' %} is-active{% endif %}" href="/inventory?tab=takaesu">高江洲発注明細</a>
+</nav>
+
+{% if current_tab == "normal" %}
+<section class="panel center{% if error %} mt-14{% endif %}">
+  <h2 class="panel-title">最新データで集計する</h2>
+  <p class="panel-lead">Next Engineから最新の受注明細を取得し、商品マスタと照合して集計します。</p>
+  <div class="flow center">
+    <span class="flow-chip" data-chip="1"><span class="flow-num">1</span>Next Engineから取得</span>
+    <span class="flow-chip" data-chip="2"><span class="flow-num">2</span>商品マスタと照合</span>
+    <span class="flow-chip" data-chip="3"><span class="flow-num">3</span>通常・選べるを集計</span>
   </div>
 
-  {% if error %}
-    <div class="status-panel error">
-      <h2>エラー</h2>
-      <p>{{ error }}</p>
-    </div>
-  {% endif %}
-
-  {% if download_result %}
-    <div class="status-panel ok">
-      <h2>取得完了</h2>
-      <dl class="meta-grid">
-        <dt>保存ファイル</dt>
-        <dd>{{ download_result.downloaded_file }}</dd>
-        <dt>元ファイル名</dt>
-        <dd>{{ download_result.source_filename }}</dd>
-        <dt>保存日時</dt>
-        <dd>{{ download_result.saved_at.strftime("%Y-%m-%d %H:%M:%S") }}</dd>
-      </dl>
-    </div>
-  {% endif %}
-
-  {% if result %}
-    <div class="status-panel ok">
-      <h2>集計条件</h2>
-      <dl class="meta-grid">
-        <dt>生成日時</dt>
-        <dd>{{ result.generated_at.strftime("%Y-%m-%d %H:%M:%S") }}</dd>
-        <dt>CSV</dt>
-        <dd>{{ result.source_csv }}</dd>
-        <dt>CSV行数</dt>
-        <dd>{{ result.source_rows }}</dd>
-        <dt>商品管理シート</dt>
-        <dd>{{ result.paths.master_book }}</dd>
-      </dl>
+  <form method="post" action="/inventory/fetch-next-engine" data-progress-form data-progress-endpoint="/inventory/fetch-next-engine/start">
+    <input type="hidden" name="slow_mo_ms" value="{{ slow_mo_ms|default(150) }}">
+    <div class="cta-wrap">
+      <button class="btn-cta" type="submit">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
+        最新データで集計する
+      </button>
+      <span class="run-note">所要 約1分</span>
     </div>
 
-    {% if result.warnings %}
-      <div class="status-panel warn">
-        <h2>確認事項</h2>
-        <ul class="compact-list">
-          {% for warning in result.warnings %}
-            <li>{{ warning }}</li>
-          {% endfor %}
-        </ul>
+    <details class="adv-fold">
+      <summary>
+        <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#a79c8f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+        取得方法（通常は変更不要）
+      </summary>
+      <div class="adv-body">
+        <p class="adv-note">画面を見ながら取得したいときだけ変更します。通常はバックグラウンドのままで構いません。</p>
+        <div class="field-row">
+          <label class="field">
+            <span class="field-label">実行モード</span>
+            <select class="select" name="browser_mode">
+              <option value="background"{% if browser_mode|default("background") != "front" %} selected{% endif %}>バックグラウンド</option>
+              <option value="front"{% if browser_mode|default("background") == "front" %} selected{% endif %}>画面を表示</option>
+            </select>
+          </label>
+        </div>
       </div>
-    {% endif %}
-
-    <section class="data-section">
-      <div class="table-head">
-        <h2>通常商品</h2>
-        <span class="badge">{{ result.normal_count }} 件</span>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>商品コード</th>
-              <th>商品名</th>
-              <th class="number">受注数</th>
-              <th class="number">引当数</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for row in result.normal_rows %}
-              <tr>
-                <td>{{ row["商品ｺｰﾄﾞ"] }}</td>
-                <td>{{ row["商品名"] }}</td>
-                <td class="number">{{ row["受注数"] }}</td>
-                <td class="number">{{ row["引当数"] }}</td>
-              </tr>
-            {% else %}
-              <tr><td colspan="4" class="empty">対象データなし</td></tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <section class="data-section">
-      <div class="table-head">
-        <h2>選べるセット</h2>
-        <span class="badge">{{ result.choice_count }} 件</span>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>商品名</th>
-              <th class="number">発注数量</th>
-              <th>備考</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for row in result.choice_rows %}
-              <tr>
-                <td>{{ row["商品名"] }}</td>
-                <td class="number">{{ row["発注数量"] }}</td>
-                <td>{{ row["備考"] }}</td>
-              </tr>
-            {% else %}
-              <tr><td colspan="3" class="empty">対象データなし</td></tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  {% endif %}
+    </details>
+  </form>
 </section>
+
+{% if defer_preview %}
+  <div class="lazy-slot" data-lazy="/inventory/preview?tab=normal">
+    <span class="lazy-spinner" aria-hidden="true"></span>最新の集計を読み込み中…
+  </div>
+{% else %}
+  {% include "_inventory_results.html" %}
+{% endif %}
+{% else %}
+<section class="panel center{% if error %} mt-14{% endif %}">
+  <h2 class="panel-title">高江洲発注明細を作成する</h2>
+  <p class="panel-lead">高江洲の発注対象だけを集計し、発注書CSVを作成します。</p>
+  <div class="flow center">
+    <span class="flow-chip" data-chip="1"><span class="flow-num">1</span>Next Engineから取得</span>
+    <span class="flow-chip" data-chip="2"><span class="flow-num">2</span>商品マスタと照合</span>
+    <span class="flow-chip" data-chip="3"><span class="flow-num">3</span>通常・選べるを集計</span>
+  </div>
+
+  <form method="post" action="/inventory/takaesu/prepare" data-progress-form data-progress-endpoint="/inventory/takaesu/prepare/start">
+    <input type="hidden" name="slow_mo_ms" value="{{ takaesu_slow_mo_ms|default(150) }}">
+    <div class="cta-wrap">
+      <button class="btn-cta" type="submit">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
+        最新データで高江洲発注書を作成
+      </button>
+      <span class="run-note">所要 約1分</span>
+    </div>
+
+    <details class="adv-fold">
+      <summary>
+        <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#a79c8f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+        取得方法（通常は変更不要）
+      </summary>
+      <div class="adv-body">
+        <p class="adv-note">画面を見ながら取得したいときだけ変更します。通常はバックグラウンドのままで構いません。</p>
+        <div class="field-row">
+          <label class="field">
+            <span class="field-label">実行モード</span>
+            <select class="select" name="browser_mode">
+              <option value="background"{% if takaesu_browser_mode|default("background") != "front" %} selected{% endif %}>バックグラウンド</option>
+              <option value="front"{% if takaesu_browser_mode|default("background") == "front" %} selected{% endif %}>画面を表示</option>
+            </select>
+          </label>
+        </div>
+      </div>
+    </details>
+  </form>
+</section>
+
+{% if defer_preview %}
+  <div class="lazy-slot" data-lazy="/inventory/preview?tab=takaesu">
+    <span class="lazy-spinner" aria-hidden="true"></span>高江洲発注明細を読み込み中…
+  </div>
+{% else %}
+  {% include "_takaesu_results.html" %}
+{% endif %}
+{% endif %}
+
+<div id="progress-panel" class="progress-panel mt-14" hidden>
+  <div class="progress-head">
+    <div>
+      <h2 id="progress-title">処理状況</h2>
+      <p id="progress-message" class="progress-message">開始待ちです。</p>
+    </div>
+    <span id="progress-status" class="badge">待機中</span>
+  </div>
+  <ol id="progress-steps" class="progress-steps"></ol>
+  <p id="progress-error" class="progress-error" hidden></p>
+</div>
+
+<script>
+(() => {
+  const panel = document.getElementById("progress-panel");
+  if (!panel) return;
+  const title = document.getElementById("progress-title");
+  const message = document.getElementById("progress-message");
+  const statusBadge = document.getElementById("progress-status");
+  const stepsList = document.getElementById("progress-steps");
+  const errorBox = document.getElementById("progress-error");
+  const forms = document.querySelectorAll("[data-progress-form]");
+
+  // 表示中タブのフローチップ(1..3)へステップを対応付け。通常: fetch=①, aggregate=②③。高江洲: build=①②③。
+  const flowChips = [...document.querySelectorAll(".flow [data-chip]")];
+  const STEP_CHIPS = { fetch: [1], aggregate: [2, 3] };
+  const clearFlowChips = () => {
+    for (const chip of flowChips) chip.classList.remove("is-active", "is-done", "is-failed");
+  };
+  const updateFlowChips = (job) => {
+    const byChip = {};
+    for (const step of job.steps || []) {
+      for (const n of STEP_CHIPS[step.key] || []) {
+        (byChip[n] = byChip[n] || []).push(step.status);
+      }
+    }
+    for (const chip of flowChips) {
+      const n = Number(chip.dataset.chip);
+      const st = byChip[n] || [];
+      chip.classList.remove("is-active", "is-done", "is-failed");
+      if (!st.length) continue;
+      if (st.includes("failed")) chip.classList.add("is-failed");
+      else if (st.includes("running")) chip.classList.add("is-active");
+      else if (st.every((s) => s === "completed")) chip.classList.add("is-done");
+      else if (st.includes("completed")) chip.classList.add("is-active");
+    }
+  };
+
+  const statusLabels = { queued: "待機中", running: "処理中", completed: "完了", failed: "エラー", pending: "待機中" };
+  const stepLabels = { pending: "待機中", running: "処理中", completed: "完了", failed: "エラー" };
+
+  const render = (job) => {
+    panel.hidden = false;
+    panel.classList.toggle("ok", job.status === "completed");
+    panel.classList.toggle("error", job.status === "failed");
+    panel.classList.toggle("warn", job.status === "running" || job.status === "queued");
+    title.textContent = job.title || "処理状況";
+    message.textContent = job.message || "";
+    statusBadge.textContent = statusLabels[job.status] || job.status;
+    stepsList.innerHTML = "";
+    for (const step of job.steps || []) {
+      const item = document.createElement("li");
+      item.className = `progress-step is-${step.status}`;
+      const dot = document.createElement("span");
+      dot.className = "step-dot";
+      const body = document.createElement("div");
+      const label = document.createElement("strong");
+      label.textContent = step.label;
+      const detail = document.createElement("small");
+      detail.textContent = `${stepLabels[step.status] || step.status}${step.detail ? " - " + step.detail : ""}`;
+      body.append(label, detail);
+      item.append(dot, body);
+      stepsList.appendChild(item);
+    }
+    errorBox.hidden = !job.error;
+    errorBox.textContent = job.error || "";
+    updateFlowChips(job);
+  };
+
+  const enableButtons = () => {
+    for (const button of document.querySelectorAll("[data-progress-form] button")) button.disabled = false;
+  };
+
+  const poll = async (jobId) => {
+    const response = await fetch(`/progress/${jobId}`, { cache: "no-store" });
+    if (!response.ok) throw new Error("進捗を取得できませんでした。");
+    const job = await response.json();
+    render(job);
+    if (job.status === "completed") {
+      message.textContent = "完了しました。結果を表示します…";
+      setTimeout(() => window.location.assign(window.location.href), 900);
+      return;
+    }
+    if (job.status === "failed") {
+      enableButtons();
+      return;
+    }
+    setTimeout(() => poll(jobId).catch(showError), 1000);
+  };
+
+  const showError = (error) => {
+    clearFlowChips();
+    panel.hidden = false;
+    panel.classList.remove("ok", "warn");
+    panel.classList.add("error");
+    title.textContent = "処理状況";
+    message.textContent = "進捗表示でエラーが発生しました。";
+    statusBadge.textContent = "エラー";
+    errorBox.hidden = false;
+    errorBox.textContent = error.message || String(error);
+    enableButtons();
+  };
+
+  for (const form of forms) {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const endpoint = form.dataset.progressEndpoint;
+      if (!endpoint) { form.submit(); return; }
+      // fetch に FormData を渡すと multipart になりサーバーの parse_qs が読めないため、
+      // ボタン無効化の前に URLSearchParams(urlencoded) として本文を構築する。
+      const body = new URLSearchParams(new FormData(form, event.submitter));
+      for (const button of document.querySelectorAll("[data-progress-form] button")) button.disabled = true;
+      clearFlowChips();
+      render({ title: "処理状況", status: "queued", message: "ジョブを開始しています。", steps: [] });
+      try {
+        const response = await fetch(endpoint, { method: "POST", body });
+        if (!response.ok) {
+          const text = await response.text().catch(() => "");
+          throw new Error(text || "処理を開始できませんでした。");
+        }
+        const payload = await response.json();
+        await poll(payload.job_id);
+      } catch (error) {
+        showError(error);
+      }
+    });
+  }
+})();
+</script>
 {% endblock %}

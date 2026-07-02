@@ -6,21 +6,16 @@ import hashlib
 import json
 import os
 import re
-import time
 import unicodedata
 import warnings as warning_module
-from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable, Iterable, Iterator
-
-try:
-    import msvcrt
-except ImportError:  # pragma: no cover - Windows production path uses msvcrt.
-    msvcrt = None
+from typing import Callable, Iterable
 
 import openpyxl
+
+from portal_app.services.master_cache import cached_by_mtime
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 
@@ -31,6 +26,11 @@ from portal_app.services.next_engine_downloader import (
     _auto_accept_dialogs,
     _chromium_launch_options,
     _headless_default,
+    _next_engine_storage_lock,
+)
+from portal_app.services.next_engine_order_status import (
+    OrderStatusBatchRestoreResult,
+    restore_next_engine_print_wait_batch_sync,
 )
 from portal_app.services.paths import PortalPaths, find_portal_paths
 
@@ -41,8 +41,9 @@ CLICKPOST_URL = "https://clickpost.jp/"
 CLICKPOST_MYPAGE_URL = "https://clickpost.jp/mypage/index"
 CLICKPOST_MULTIPLE_PRINT_URL = "https://clickpost.jp/labels/multiple_print"
 YAHOO_LOGOUT_URL = "https://login.yahoo.co.jp/config/login?.done=https%3A%2F%2Fwww.yahoo.co.jp&.src=help&logout=1"
+INVOICE_ACTION_ID = "#extension_execute_mainfunction_4"
+INVOICE_DOWNLOAD_BUTTON_ID = "#btn_nouhinsho_dl_exec"
 CLICKPOST_STORAGE_STATE_PATH = APP_ROOT / "data" / "storage" / "clickpost.json"
-NEXT_ENGINE_LOCK_PATH = APP_ROOT / "data" / "storage" / "next_engine.lock"
 CLICKPOST_AUDIT_LOG_DIR = APP_ROOT / "logs" / "clickpost"
 CLICKPOST_AUDIT_LOG_PATH = CLICKPOST_AUDIT_LOG_DIR / "clickpost_audit.jsonl"
 CLICKPOST_HEADERS = (
@@ -210,6 +211,21 @@ class ClickPostProductDownloadResult:
 
 
 @dataclass(frozen=True)
+class ClickPostInvoiceDownloadResult:
+    executed: bool
+    before_list: ClickPostOrderListSnapshot
+    downloaded_file: Path | None
+    source_filename: str | None
+    restored: bool
+    restore_result: OrderStatusBatchRestoreResult | None
+    restore_verify_result: OrderStatusBatchRestoreResult | None
+    skipped_reason: str | None
+    error: str | None
+    dialog_messages: tuple[str, ...]
+    audit_path: Path | None
+
+
+@dataclass(frozen=True)
 class ClickPostCredential:
     yahoo_login_id: str | None
     yahoo_password: str | None
@@ -281,6 +297,7 @@ class ClickPostTrackingExportResult:
 class ClickPostPreparationResult:
     buyer: ClickPostBuyerDownloadResult | None
     product: ClickPostProductDownloadResult | None
+    invoice: ClickPostInvoiceDownloadResult | None
     conversion: ClickPostConversionResult
     letterpack: LetterPackAddressResult
     tracking_reflection: ClickPostTrackingReflectionResult | None
@@ -389,38 +406,6 @@ def create_clickpost_tracking_reflection_csv(
         preview_limit=preview_limit,
     )
 
-
-@contextmanager
-def _next_engine_storage_lock(timeout_seconds: float = 180.0) -> Iterator[None]:
-    NEXT_ENGINE_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    started_at = time.monotonic()
-    with NEXT_ENGINE_LOCK_PATH.open("a+b") as fp:
-        fp.seek(0, os.SEEK_END)
-        if fp.tell() == 0:
-            fp.write(b"\0")
-            fp.flush()
-
-        if msvcrt is None:
-            yield
-            return
-
-        while True:
-            try:
-                fp.seek(0)
-                msvcrt.locking(fp.fileno(), msvcrt.LK_NBLCK, 1)
-                break
-            except OSError as exc:
-                if time.monotonic() - started_at >= timeout_seconds:
-                    raise TimeoutError("Next Engine storage state lock timed out.") from exc
-                time.sleep(0.5)
-
-        try:
-            yield
-        finally:
-            fp.seek(0)
-            msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
-
-
 async def inspect_clickpost_order_list(
     *,
     headless: bool | None = None,
@@ -492,6 +477,71 @@ def download_clickpost_product_data_sync(
                 slow_mo_ms=slow_mo_ms,
             )
         )
+
+
+async def download_clickpost_invoice_batch(
+    *,
+    execute: bool,
+    expected_order_numbers: tuple[str, ...] = tuple(),
+    headless: bool | None = None,
+    slow_mo_ms: int = 0,
+) -> ClickPostInvoiceDownloadResult:
+    client = NextEngineClickPostClient(headless=headless, slow_mo_ms=slow_mo_ms)
+    return await client.download_invoice_batch(
+        execute=execute,
+        expected_order_numbers=expected_order_numbers,
+    )
+
+
+def download_clickpost_invoice_batch_sync(
+    *,
+    execute: bool,
+    expected_order_numbers: tuple[str, ...] = tuple(),
+    restore_after_download: bool = False,
+    headless: bool | None = None,
+    slow_mo_ms: int = 0,
+) -> ClickPostInvoiceDownloadResult:
+    with _next_engine_storage_lock():
+        result = asyncio.run(
+            download_clickpost_invoice_batch(
+                execute=execute,
+                expected_order_numbers=expected_order_numbers,
+                headless=headless,
+                slow_mo_ms=slow_mo_ms,
+            )
+        )
+
+    restore_result: OrderStatusBatchRestoreResult | None = None
+    restore_verify_result: OrderStatusBatchRestoreResult | None = None
+    if (
+        restore_after_download
+        and result.executed
+        and result.downloaded_file is not None
+        and result.before_list.order_numbers
+    ):
+        restore_result = restore_next_engine_print_wait_batch_sync(
+            result.before_list.order_numbers,
+            execute=True,
+            headless=headless,
+            slow_mo_ms=slow_mo_ms,
+        )
+        restore_verify_result = restore_next_engine_print_wait_batch_sync(
+            result.before_list.order_numbers,
+            execute=False,
+            headless=headless,
+            slow_mo_ms=slow_mo_ms,
+        )
+        result = replace(
+            result,
+            restored=True,
+            restore_result=restore_result,
+            restore_verify_result=restore_verify_result,
+        )
+
+    _append_audit("invoice_download", result)
+    if result.error:
+        raise RuntimeError(result.error)
+    return result
 
 
 async def upload_clickpost_csv(
@@ -668,12 +718,15 @@ def prepare_clickpost_sync(
     slow_mo_ms: int,
     preview_limit: int,
     write_letterpack_addresses: bool = False,
+    download_invoices: bool = False,
+    restore_invoices_after_download: bool = False,
     tracking_csv: Path | None = None,
     write_tracking_reflection: bool = False,
     progress_callback: Callable[[str, str, str | None], None] | None = None,
 ) -> ClickPostPreparationResult:
     buyer: ClickPostBuyerDownloadResult | None = None
     product: ClickPostProductDownloadResult | None = None
+    invoice: ClickPostInvoiceDownloadResult | None = None
     upload_result: ClickPostUploadResult | None = None
 
     def progress(step: str, status: str, detail: str | None = None) -> None:
@@ -715,6 +768,23 @@ def prepare_clickpost_sync(
             + (f" / {product.downloaded_file}" if product.downloaded_file else "")
         )
         progress("product_download", "completed", product_detail)
+
+        if download_invoices:
+            expected_order_numbers = buyer.snapshot.order_numbers if buyer else tuple()
+            progress("invoice_download", "running", "納品書PDFをダウンロードしています。")
+            invoice = download_clickpost_invoice_batch_sync(
+                execute=execute_downloads,
+                expected_order_numbers=expected_order_numbers,
+                restore_after_download=restore_invoices_after_download,
+                headless=not headed,
+                slow_mo_ms=slow_mo_ms,
+            )
+            invoice_detail = (
+                f"{invoice.before_list.count}件"
+                + (f" / {invoice.downloaded_file}" if invoice.downloaded_file else "")
+                + (" / 復旧済み" if invoice.restored else "")
+            )
+            progress("invoice_download", "completed", invoice_detail)
 
     downloaded_buyer_csv = buyer.downloaded_file if buyer and buyer.downloaded_file else None
     downloaded_product_csv = product.downloaded_file if product and product.downloaded_file else None
@@ -794,10 +864,11 @@ def prepare_clickpost_sync(
         )
         progress("upload_check", "completed", f"{upload_result.target_rows}件")
 
-    warnings = _preparation_warnings(buyer=buyer, product=product, conversion=conversion)
+    warnings = _preparation_warnings(buyer=buyer, product=product, invoice=invoice, conversion=conversion)
     result = ClickPostPreparationResult(
         buyer=buyer,
         product=product,
+        invoice=invoice,
         conversion=conversion,
         letterpack=letterpack,
         tracking_reflection=tracking_reflection,
@@ -933,6 +1004,99 @@ class NextEngineClickPostClient:
             )
             _append_audit("product_download", result)
             return result
+
+    async def download_invoice_batch(
+        self,
+        *,
+        execute: bool,
+        expected_order_numbers: tuple[str, ...] = tuple(),
+    ) -> ClickPostInvoiceDownloadResult:
+        async with self._open_filtered_order_list() as page:
+            snapshot = await _snapshot_clickpost_order_list(page)
+            if expected_order_numbers and snapshot.order_numbers != expected_order_numbers:
+                return ClickPostInvoiceDownloadResult(
+                    executed=execute,
+                    before_list=snapshot,
+                    downloaded_file=None,
+                    source_filename=None,
+                    restored=False,
+                    restore_result=None,
+                    restore_verify_result=None,
+                    skipped_reason="target_mismatch",
+                    error=(
+                        "クリックポスト納品書PDFの対象伝票番号が購入者/受注明細データと一致しません。"
+                        f" expected={expected_order_numbers} actual={snapshot.order_numbers}"
+                    ),
+                    dialog_messages=tuple(),
+                    audit_path=CLICKPOST_AUDIT_LOG_PATH,
+                )
+
+            if not execute:
+                return ClickPostInvoiceDownloadResult(
+                    executed=False,
+                    before_list=snapshot,
+                    downloaded_file=None,
+                    source_filename=None,
+                    restored=False,
+                    restore_result=None,
+                    restore_verify_result=None,
+                    skipped_reason="dry_run",
+                    error=None,
+                    dialog_messages=tuple(),
+                    audit_path=None,
+                )
+
+            if snapshot.count == 0:
+                return ClickPostInvoiceDownloadResult(
+                    executed=True,
+                    before_list=snapshot,
+                    downloaded_file=None,
+                    source_filename=None,
+                    restored=False,
+                    restore_result=None,
+                    restore_verify_result=None,
+                    skipped_reason="no_orders",
+                    error=None,
+                    dialog_messages=tuple(),
+                    audit_path=CLICKPOST_AUDIT_LOG_PATH,
+                )
+
+            destination = _next_clickpost_invoice_pdf_path(self.paths)
+            dialog_messages: list[str] = []
+            try:
+                page.on("dialog", lambda dialog: asyncio.create_task(_accept_invoice_dialog(dialog, dialog_messages)))
+                source_filename = await _download_invoice_pdf_from_order_list(
+                    page,
+                    snapshot,
+                    destination,
+                )
+                return ClickPostInvoiceDownloadResult(
+                    executed=True,
+                    before_list=snapshot,
+                    downloaded_file=destination,
+                    source_filename=source_filename,
+                    restored=False,
+                    restore_result=None,
+                    restore_verify_result=None,
+                    skipped_reason=None,
+                    error=None,
+                    dialog_messages=tuple(dialog_messages),
+                    audit_path=CLICKPOST_AUDIT_LOG_PATH,
+                )
+            except Exception as exc:
+                return ClickPostInvoiceDownloadResult(
+                    executed=True,
+                    before_list=snapshot,
+                    downloaded_file=None,
+                    source_filename=None,
+                    restored=False,
+                    restore_result=None,
+                    restore_verify_result=None,
+                    skipped_reason=None,
+                    error=str(exc),
+                    dialog_messages=tuple(dialog_messages),
+                    audit_path=CLICKPOST_AUDIT_LOG_PATH,
+                )
 
     def _open_filtered_order_list(self):
         return _ClickPostOrderListSession(self)
@@ -2532,13 +2696,29 @@ def _load_master_content_rules(
     rules: dict[str, ContentRule],
     warnings: list[str],
 ) -> None:
+    loaded, load_warnings = cached_by_mtime(
+        path,
+        "clickpost_content_rules",
+        lambda: _read_master_content_rules_impl(path),
+    )
+    warnings.extend(load_warnings)
+    for code, rule in loaded.items():
+        if code not in rules:
+            rules[code] = rule
+
+
+def _read_master_content_rules_impl(
+    path: Path,
+) -> tuple[dict[str, ContentRule], list[str]]:
+    rules: dict[str, ContentRule] = {}
+    warnings: list[str] = []
     try:
         with warning_module.catch_warnings():
             warning_module.simplefilter("ignore", UserWarning)
             workbook = openpyxl.load_workbook(path, read_only=False, data_only=True, keep_vba=True)
     except Exception as exc:
         warnings.append(f"商品管理シートの内容品リストを読み込めませんでした: {exc}")
-        return
+        return rules, warnings
     try:
         worksheet = workbook["クリックポスト内容品リスト"] if "クリックポスト内容品リスト" in workbook.sheetnames else workbook.worksheets[-1]
         table = worksheet.tables.get("内容品リスト")
@@ -2547,13 +2727,13 @@ def _load_master_content_rules(
         else:
             table_rows = [list(row) for row in worksheet.iter_rows(values_only=True)]
         if not table_rows:
-            return
+            return rules, warnings
 
         header = [str(value or "").strip() for value in table_rows[0]]
         code_index = _first_index(header, ("商品ｺｰﾄﾞ", "商品コード"))
         content_index = _index_of(header, "内容品")
         if code_index is None or content_index is None:
-            return
+            return rules, warnings
         for row in table_rows[1:]:
             code = _normalize_code(row[code_index] if code_index < len(row) else "")
             prefix = str(row[content_index] or "").strip() if content_index < len(row) else ""
@@ -2561,6 +2741,7 @@ def _load_master_content_rules(
                 rules[code] = ContentRule(prefix=prefix, default_quantity=None)
     finally:
         workbook.close()
+    return rules, warnings
 
 
 def _content_for_order(
@@ -3039,6 +3220,66 @@ async def _download_ne_csv_from_current_page(page, destination: Path, *, label: 
     )
 
 
+async def _download_invoice_pdf_from_order_list(
+    page,
+    snapshot: ClickPostOrderListSnapshot,
+    destination: Path,
+) -> str | None:
+    await page.locator("#all_check").click()
+    await page.wait_for_function(
+        """
+        (expectedCount) => {
+          return document.querySelectorAll('input[name="qid[]"]:checked').length === expectedCount;
+        }
+        """,
+        arg=snapshot.count,
+        timeout=30000,
+    )
+    checked_order_numbers = await page.evaluate(
+        """
+        () => Array.from(document.querySelectorAll('input[name="qid[]"]:checked'))
+          .map((element) => element.value)
+          .filter(Boolean)
+        """
+    )
+    if tuple(str(value) for value in checked_order_numbers) != snapshot.order_numbers:
+        raise RuntimeError("納品書PDF取得前の選択伝票番号が検索結果と一致しません。")
+
+    await page.locator(INVOICE_ACTION_ID).scroll_into_view_if_needed(timeout=10000)
+    await page.locator(INVOICE_ACTION_ID).click()
+    await page.wait_for_selector(INVOICE_DOWNLOAD_BUTTON_ID, timeout=30000)
+    await _set_clickpost_invoice_options(page, mode="U")
+
+    async with page.expect_download(timeout=180000) as download_info:
+        await page.locator(INVOICE_DOWNLOAD_BUTTON_ID).click()
+    download = await download_info.value
+    await download.save_as(str(destination))
+    await page.context.storage_state(path=str(STORAGE_STATE_PATH))
+    await page.wait_for_timeout(3000)
+    return download.suggested_filename
+
+
+async def _set_clickpost_invoice_options(page, *, mode: str) -> None:
+    await _check_if_present(page, f'input[name="mode"][value="{mode}"]')
+    await _check_if_present(page, 'input[name="ss"][value="-1"]')
+    await _check_if_present(page, 'input[name="output"][value="PDF"]')
+
+
+async def _check_if_present(page, selector: str) -> None:
+    locator = page.locator(selector)
+    if await locator.count() == 0:
+        return
+    try:
+        await locator.first.check(timeout=5000)
+    except PlaywrightTimeoutError:
+        return
+
+
+async def _accept_invoice_dialog(dialog, dialog_messages: list[str]) -> None:
+    dialog_messages.append(dialog.message)
+    await dialog.accept()
+
+
 async def _prepare_next_engine_download_click(page) -> None:
     try:
         await page.keyboard.press("Escape")
@@ -3106,10 +3347,25 @@ def _next_clickpost_file_path(directory: Path, prefix: str, suffix: str) -> Path
     raise RuntimeError("保存ファイル名を決定できませんでした。")
 
 
+def _next_clickpost_invoice_pdf_path(paths: ClickPostPaths) -> Path:
+    directory = paths.portal_paths.portal_root / "ネクストエンジン" / "ne_納品書pdf"
+    directory.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%y%m%d%H%M%S")
+    candidate = directory / f"納品書_clickpost_{timestamp}.pdf"
+    if not candidate.exists():
+        return candidate
+    for index in range(1, 100):
+        indexed = directory / f"納品書_clickpost_{timestamp}_{index:02d}.pdf"
+        if not indexed.exists():
+            return indexed
+    raise RuntimeError("納品書PDFの保存ファイル名を決定できませんでした。")
+
+
 def _preparation_warnings(
     *,
     buyer: ClickPostBuyerDownloadResult | None,
     product: ClickPostProductDownloadResult | None,
+    invoice: ClickPostInvoiceDownloadResult | None,
     conversion: ClickPostConversionResult,
 ) -> list[str]:
     warnings = list(conversion.warnings)
@@ -3118,6 +3374,13 @@ def _preparation_warnings(
         product_orders = set(product.snapshot.order_numbers)
         if buyer_orders != product_orders:
             warnings.append("購入者データと商品情報データの検索対象伝票番号が一致しません。")
+    if buyer and invoice:
+        buyer_orders = set(buyer.snapshot.order_numbers)
+        invoice_orders = set(invoice.before_list.order_numbers)
+        if buyer_orders and invoice_orders and buyer_orders != invoice_orders:
+            warnings.append("購入者データと納品書PDFの対象伝票番号が一致しません。")
+    if invoice and invoice.error:
+        warnings.append(f"納品書PDFダウンロードでエラーが発生しました: {invoice.error}")
     if buyer and buyer.executed and buyer.downloaded_file:
         try:
             clickpost_rows = _count_clickpost_shipping_rows(buyer.downloaded_file)

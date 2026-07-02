@@ -7,19 +7,51 @@
     <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
   </head>
   <body>
-    <header class="topbar">
-      <div class="brand">
-        <a href="/">くりまポータルツール</a>
+    {% set nav_path = request.url.path %}
+    <header class="appbar">
+      <div class="appbar-inner">
+        <a class="brand" href="/">
+          <img class="brand-logo" src="{{ url_for('static', path='/logo.png') }}" alt="くりま">
+          <span class="brand-sep" aria-hidden="true"></span>
+          <span class="brand-tag">ポータルツール</span>
+        </a>
+        <nav class="appnav">
+          <a class="appnav-link {% if nav_path == '/' %}is-active{% endif %}" href="/">ポータル</a>
+          <a class="appnav-link {% if nav_path.startswith('/inventory') %}is-active{% endif %}" href="/inventory">在庫明細確認</a>
+          <a class="appnav-link {% if nav_path.startswith('/yamato') %}is-active{% endif %}" href="/yamato">ヤマト伝票</a>
+          <a class="appnav-link {% if nav_path.startswith('/clickpost') %}is-active{% endif %}" href="/clickpost">クリックポスト</a>
+        </nav>
       </div>
-      <nav class="nav">
-        <a href="/">ポータル</a>
-        <a href="/inventory">在庫明細確認</a>
-        <a href="/yamato">ヤマト伝票</a>
-        <a href="/clickpost">クリックポスト</a>
-      </nav>
     </header>
     <main class="page">
       {% block content %}{% endblock %}
     </main>
+    <script>
+      // 遅延ロード: [data-lazy] のスロットを、その data-lazy URL から取得したHTMLで置き換える。
+      // 重い結果セクション（プレビュー）を別エンドポイントから非同期に読み込むために使う。
+      (() => {
+        const slots = document.querySelectorAll("[data-lazy]");
+        for (const slot of slots) {
+          const url = slot.getAttribute("data-lazy");
+          if (!url) continue;
+          fetch(url, { cache: "no-store", headers: { "X-Requested-With": "fetch" } })
+            .then((res) => {
+              if (!res.ok) throw new Error("HTTP " + res.status);
+              return res.text();
+            })
+            .then((html) => {
+              slot.outerHTML = html;
+            })
+            .catch((error) => {
+              slot.classList.remove("lazy-slot");
+              slot.innerHTML =
+                '<div class="note error"><div class="note-title">最新データを読み込めませんでした</div>' +
+                '<p>時間をおいて再読込してください。' +
+                (error && error.message ? "（" + error.message + "）" : "") +
+                "</p></div>";
+            });
+        }
+      })();
+    </script>
   </body>
 </html>

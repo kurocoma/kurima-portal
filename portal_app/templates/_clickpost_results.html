@@ -1,0 +1,67 @@
+{# クリックポストの結果セクション（base継承なしのfragment）。
+   GET /clickpost/preview から遅延ロードされ、POST応答では {% include %} で再利用する。
+   preview_error は /clickpost/preview の例外時のみ設定（include 時は未定義=非表示）。 #}
+{% if preview_error %}
+  <div class="note error">
+    <div class="note-title">最新データを読み込めませんでした</div>
+    <p>{{ preview_error }}</p>
+  </div>
+{% endif %}
+{% if result %}
+  {% if not message %}
+    <div class="result-bar">
+      <span style="font-size:15px;font-weight:700;">現在の申込データ</span>
+      <span class="result-sub">{{ result.target_rows }} 件が対象です</span>
+      <a class="result-reset" href="/clickpost">再読込</a>
+    </div>
+  {% endif %}
+
+  <details class="fold mt-14">
+    <summary>変換概要<span class="fold-hint">開閉</span></summary>
+    <div class="fold-body">
+      <dl class="kv narrow">
+        <dt>購入者CSV</dt>
+        <dd class="mono">{{ result.buyer_csv }}</dd>
+        <dt>商品情報CSV</dt>
+        <dd class="mono">{{ result.product_csv }}</dd>
+        <dt>購入者行数</dt>
+        <dd>{{ result.buyer_rows }}</dd>
+        <dt>商品情報行数</dt>
+        <dd>{{ result.product_rows }}</dd>
+        <dt>対象行数</dt>
+        <dd>{{ result.target_rows }}</dd>
+        <dt>出力CSV</dt>
+        <dd class="mono">{% if result.output_csv %}{{ result.output_csv }}{% else %}未作成{% endif %}</dd>
+        <dt>監査ログ</dt>
+        <dd class="mono">{% if result.audit_path %}{{ result.audit_path }}{% else %}未記録{% endif %}</dd>
+      </dl>
+      {% if result.warnings %}
+        <ul class="note-list" style="color:var(--warn);margin-top:10px;">
+          {% for warning in result.warnings %}<li>{{ warning }}</li>{% endfor %}
+        </ul>
+      {% endif %}
+    </div>
+  </details>
+
+  <details class="fold mt-14" style="overflow:hidden;">
+    <summary>申込データプレビュー（{{ result.preview_rows|length }}件表示）<span class="fold-hint">開閉</span></summary>
+    <div class="fold-table-body">
+      <table class="tbl tbl-min-600">
+        <thead>
+          <tr>
+            {% if result.preview_rows %}
+              {% for column in result.preview_rows[0].keys() %}<th>{{ column }}</th>{% endfor %}
+            {% endif %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in result.preview_rows %}
+            <tr>{% for value in row.values() %}<td>{{ value }}</td>{% endfor %}</tr>
+          {% else %}
+            <tr><td class="empty">表示するデータがありません。</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </details>
+{% endif %}

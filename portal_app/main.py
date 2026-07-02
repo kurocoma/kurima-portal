@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import csv
 from pathlib import Path
 from urllib.parse import parse_qs, quote
 
@@ -8,7 +9,7 @@ from portal_app.env import load_env_file
 load_env_file()
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
@@ -22,16 +23,24 @@ from portal_app.services.clickpost import (
     upload_clickpost_csv_sync,
 )
 from portal_app.services.inventory import analyze_latest_inventory, result_to_csv
-from portal_app.services.inventory_pdf import inventory_result_to_pdf
+from portal_app.services.inventory_pdf import inventory_result_to_pdf, takaesu_order_sheet_to_pdf
 from portal_app.services.letterpack_pdf import create_letterpack_label_pdf
 from portal_app.services.ne02_order_details import download_ne02_order_details_sync
-from portal_app.services.next_engine_downloader import download_next_engine_order_details
+from portal_app.services.next_engine_downloader import (
+    download_next_engine_order_details,
+    download_next_engine_order_details_sync,
+)
 from portal_app.services.next_engine_order_status import restore_next_engine_print_wait_batch_sync
 from portal_app.services.paths import candidate_portal_roots, find_portal_paths
 from portal_app.services.progress_jobs import progress_jobs
 from portal_app.services.shipment_confirmation import confirm_next_engine_shipment_sync
-from portal_app.services.takaesu_orders import prepare_takaesu_order_workflow_sync
-from portal_app.services.yamato_b2_import import import_yamato_b2_csv
+from portal_app.services.takaesu_orders import (
+    create_takaesu_order_sheet_csv,
+    default_takaesu_order_sheet_csv_path,
+    download_takaesu_order_details_sync,
+    prepare_takaesu_order_workflow_sync,
+)
+from portal_app.services.yamato_b2_import import import_yamato_b2_csv, import_yamato_b2_csv_sync
 from portal_app.services.yamato_b2_workflow import prepare_yamato_b2_sync
 from portal_app.services.yamato_conversion import (
     create_ne_to_yamato_csv,
@@ -43,6 +52,7 @@ APP_DIR = Path(__file__).resolve().parent
 app = FastAPI(title="くりまポータルツール")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=APP_DIR / "templates")
+INVENTORY_TABS = {"normal", "takaesu"}
 
 
 def _parse_order_numbers(raw: str | None) -> tuple[str, ...]:
@@ -66,6 +76,49 @@ def _form_int(form: dict[str, str], key: str, default: int) -> int:
         return int(form.get(key, "") or default)
     except ValueError:
         return default
+
+
+def _inventory_tab(request: Request) -> str:
+    tab = request.query_params.get("tab", "normal")
+    return tab if tab in INVENTORY_TABS else "normal"
+
+
+def _inventory_response(
+    request: Request,
+    *,
+    active_tab: str = "normal",
+    result=None,
+    download_result=None,
+    takaesu_result=None,
+    browser_mode: str = "background",
+    slow_mo_ms: int = 150,
+    takaesu_browser_mode: str = "background",
+    takaesu_slow_mo_ms: int = 150,
+    takaesu_download_ready: bool = False,
+    defer_preview: bool = False,
+    error: str | None = None,
+    status_code: int = 200,
+):
+    return templates.TemplateResponse(
+        "inventory.html",
+        {
+            "request": request,
+            "active_tab": active_tab,
+            "defer_preview": defer_preview,
+            "result": result,
+            "download_result": download_result,
+            "takaesu_result": takaesu_result,
+            "takaesu_sheet": takaesu_result.order_sheet if takaesu_result else None,
+            "takaesu_download_result": takaesu_result.download if takaesu_result else None,
+            "takaesu_download_ready": takaesu_download_ready,
+            "browser_mode": browser_mode,
+            "slow_mo_ms": slow_mo_ms,
+            "takaesu_browser_mode": takaesu_browser_mode,
+            "takaesu_slow_mo_ms": takaesu_slow_mo_ms,
+            "error": error,
+        },
+        status_code=status_code,
+    )
 
 
 def _yamato_selected_steps(form: dict[str, str]) -> dict[str, bool]:
@@ -134,6 +187,7 @@ def _clickpost_upload_summary(result) -> dict[str, object]:
 def _clickpost_prepare_summary(result) -> dict[str, object]:
     buyer = getattr(result, "buyer", None)
     product = getattr(result, "product", None)
+    invoice = getattr(result, "invoice", None)
     conversion = getattr(result, "conversion", None)
     letterpack = getattr(result, "letterpack", None)
     return {
@@ -141,6 +195,9 @@ def _clickpost_prepare_summary(result) -> dict[str, object]:
         "buyer_count": getattr(getattr(buyer, "snapshot", None), "count", None),
         "product_file": _path_text(getattr(product, "downloaded_file", None)),
         "product_count": getattr(getattr(product, "snapshot", None), "count", None),
+        "invoice_file": _path_text(getattr(invoice, "downloaded_file", None)),
+        "invoice_count": getattr(getattr(invoice, "before_list", None), "count", None),
+        "invoice_restored": getattr(invoice, "restored", False),
         "clickpost_csv": _path_text(getattr(conversion, "output_csv", None)),
         "clickpost_rows": getattr(conversion, "output_rows", 0) if conversion else 0,
         "letterpack_csv": _path_text(getattr(letterpack, "output_csv", None)),
@@ -220,41 +277,104 @@ def dashboard(request: Request):
 
 @app.get("/inventory", response_class=HTMLResponse)
 def inventory(request: Request):
+    # プレビュー（商品マスタ読込・集計を含む重い処理）はGET時に実行せず、
+    # /inventory/preview から非同期で読み込む（操作ボタンを即表示するため）。
+    active_tab = _inventory_tab(request)
+    return _inventory_response(request, active_tab=active_tab, defer_preview=True)
+
+
+@app.get("/inventory/preview", response_class=HTMLResponse)
+def inventory_preview(request: Request):
+    # GET /inventory から遅延ロードされる結果fragment。
+    # 重いプレビュー（商品マスタ読込・集計）はここで実行する。
+    active_tab = _inventory_tab(request)
+    if active_tab == "takaesu":
+        try:
+            takaesu_result = prepare_takaesu_order_workflow_sync(
+                dry_run=False,
+                execute_download=False,
+                write_order_sheet=False,
+                preview_limit=50,
+                write_audit=False,
+            )
+            return templates.TemplateResponse(
+                "_takaesu_results.html",
+                {
+                    "request": request,
+                    "takaesu_result": takaesu_result,
+                    "takaesu_sheet": takaesu_result.order_sheet if takaesu_result else None,
+                    "takaesu_download_result": takaesu_result.download if takaesu_result else None,
+                    "takaesu_download_ready": default_takaesu_order_sheet_csv_path().is_file(),
+                    "takaesu_browser_mode": "background",
+                    "takaesu_slow_mo_ms": 150,
+                    "preview_error": None,
+                },
+            )
+        except Exception as exc:
+            return templates.TemplateResponse(
+                "_takaesu_results.html",
+                {
+                    "request": request,
+                    "takaesu_result": None,
+                    "takaesu_sheet": None,
+                    "takaesu_download_result": None,
+                    "takaesu_download_ready": False,
+                    "takaesu_browser_mode": "background",
+                    "takaesu_slow_mo_ms": 150,
+                    "preview_error": str(exc),
+                },
+            )
+
     try:
         result = analyze_latest_inventory()
         return templates.TemplateResponse(
-            "inventory.html",
+            "_inventory_results.html",
             {
                 "request": request,
                 "result": result,
-                "error": None,
+                "download_result": None,
+                "browser_mode": "background",
+                "slow_mo_ms": 150,
+                "preview_error": None,
             },
         )
     except Exception as exc:
         return templates.TemplateResponse(
-            "inventory.html",
+            "_inventory_results.html",
             {
                 "request": request,
                 "result": None,
-                "error": str(exc),
+                "download_result": None,
+                "browser_mode": "background",
+                "slow_mo_ms": 150,
+                "preview_error": str(exc),
             },
-            status_code=500,
         )
 
 
 @app.post("/inventory/fetch-next-engine", response_class=HTMLResponse)
 async def inventory_fetch_next_engine(request: Request):
+    form = await _read_form(request)
+    browser_mode = form.get("browser_mode", "background")
+    if browser_mode not in {"background", "front"}:
+        browser_mode = "background"
+    headed = browser_mode == "front"
+    slow_mo_ms = _form_int(form, "slow_mo_ms", 150 if headed else 0)
+    if not headed:
+        slow_mo_ms = 0
     try:
-        download_result = await download_next_engine_order_details()
+        download_result = await download_next_engine_order_details(
+            headless=not headed,
+            slow_mo_ms=slow_mo_ms,
+        )
         result = analyze_latest_inventory()
-        return templates.TemplateResponse(
-            "inventory.html",
-            {
-                "request": request,
-                "result": result,
-                "download_result": download_result,
-                "error": None,
-            },
+        return _inventory_response(
+            request,
+            active_tab="normal",
+            result=result,
+            download_result=download_result,
+            browser_mode=browser_mode,
+            slow_mo_ms=slow_mo_ms if headed else 150,
         )
     except Exception as exc:
         current_result = None
@@ -262,16 +382,210 @@ async def inventory_fetch_next_engine(request: Request):
             current_result = analyze_latest_inventory()
         except Exception:
             pass
-        return templates.TemplateResponse(
-            "inventory.html",
-            {
-                "request": request,
-                "result": current_result,
-                "download_result": None,
-                "error": str(exc),
-            },
+        return _inventory_response(
+            request,
+            active_tab="normal",
+            result=current_result,
+            browser_mode=browser_mode,
+            slow_mo_ms=slow_mo_ms if headed else 150,
+            error=str(exc),
             status_code=500,
         )
+
+
+@app.get("/inventory/fetch-next-engine")
+def inventory_fetch_next_engine_get():
+    return RedirectResponse(url="/inventory", status_code=303)
+
+
+@app.post("/inventory/fetch-next-engine/start")
+async def inventory_fetch_next_engine_start(request: Request):
+    # 通常タブの非同期版。進捗をフローチップに同期表示する。
+    # ステップ: fetch(NE取得=チップ①) / aggregate(マスタ照合・集計=チップ②③)。
+    form = await _read_form(request)
+    browser_mode = form.get("browser_mode", "background")
+    if browser_mode not in {"background", "front"}:
+        browser_mode = "background"
+    headed = browser_mode == "front"
+    slow_mo_ms = _form_int(form, "slow_mo_ms", 150 if headed else 0)
+    if not headed:
+        slow_mo_ms = 0
+
+    def worker(job_id: str) -> None:
+        progress_jobs.update_step(job_id, "fetch", status="running")
+        try:
+            download_next_engine_order_details_sync(headless=not headed, slow_mo_ms=slow_mo_ms)
+        except Exception:
+            progress_jobs.update_step(job_id, "fetch", status="failed")
+            raise
+        progress_jobs.update_step(job_id, "fetch", status="completed")
+
+        progress_jobs.update_step(job_id, "aggregate", status="running")
+        try:
+            result = analyze_latest_inventory()
+        except Exception:
+            progress_jobs.update_step(job_id, "aggregate", status="failed")
+            raise
+        progress_jobs.update_step(job_id, "aggregate", status="completed")
+
+        progress_jobs.finish(
+            job_id,
+            message="集計が完了しました。",
+            result={
+                "source_rows": getattr(result, "source_rows", None),
+                "normal_count": getattr(result, "normal_count", None),
+                "choice_count": getattr(result, "choice_count", None),
+            },
+        )
+
+    job_id = progress_jobs.start(
+        title="在庫明細 集計",
+        steps=[("fetch", "Next Engineから取得"), ("aggregate", "商品マスタ照合・集計")],
+        worker=worker,
+        workflow="inventory_fetch_next_engine",
+        metadata={"browser_mode": browser_mode, "slow_mo_ms": slow_mo_ms},
+    )
+    return {"job_id": job_id}
+
+
+@app.post("/inventory/takaesu/prepare", response_class=HTMLResponse)
+async def inventory_takaesu_prepare(request: Request):
+    form = await _read_form(request)
+    browser_mode = form.get("browser_mode", "background")
+    if browser_mode not in {"background", "front"}:
+        browser_mode = "background"
+    headed = browser_mode == "front"
+    slow_mo_ms = _form_int(form, "slow_mo_ms", 150 if headed else 0)
+    if not headed:
+        slow_mo_ms = 0
+
+    try:
+        takaesu_result = await run_in_threadpool(
+            prepare_takaesu_order_workflow_sync,
+            dry_run=False,
+            execute_download=True,
+            write_order_sheet=True,
+            headless=not headed,
+            slow_mo_ms=slow_mo_ms,
+            preview_limit=50,
+        )
+        return _inventory_response(
+            request,
+            active_tab="takaesu",
+            takaesu_result=takaesu_result,
+            takaesu_browser_mode=browser_mode,
+            takaesu_slow_mo_ms=slow_mo_ms if headed else 150,
+        )
+    except Exception as exc:
+        current_result = None
+        try:
+            current_result = await run_in_threadpool(
+                prepare_takaesu_order_workflow_sync,
+                dry_run=False,
+                execute_download=False,
+                write_order_sheet=False,
+                preview_limit=50,
+                write_audit=False,
+            )
+        except Exception:
+            pass
+        return _inventory_response(
+            request,
+            active_tab="takaesu",
+            takaesu_result=current_result,
+            takaesu_browser_mode=browser_mode,
+            takaesu_slow_mo_ms=slow_mo_ms if headed else 150,
+            error=str(exc),
+            status_code=500,
+        )
+
+
+@app.get("/inventory/takaesu/prepare")
+def inventory_takaesu_prepare_get():
+    return RedirectResponse(url="/inventory?tab=takaesu", status_code=303)
+
+
+@app.post("/inventory/takaesu/prepare/start")
+async def inventory_takaesu_prepare_start(request: Request):
+    # 通常タブと進捗を揃えるため、取得(download)と発注書作成(create)を分離した2ステップにする。
+    # ステップ: fetch(NE取得=チップ①) / aggregate(マスタ照合・発注書作成=チップ②③)。
+    form = await _read_form(request)
+    browser_mode = form.get("browser_mode", "background")
+    if browser_mode not in {"background", "front"}:
+        browser_mode = "background"
+    headed = browser_mode == "front"
+    slow_mo_ms = _form_int(form, "slow_mo_ms", 150 if headed else 0)
+    if not headed:
+        slow_mo_ms = 0
+
+    def worker(job_id: str) -> None:
+        progress_jobs.update_step(job_id, "fetch", status="running")
+        try:
+            download = download_takaesu_order_details_sync(
+                execute=True,
+                headless=not headed,
+                slow_mo_ms=slow_mo_ms,
+                write_audit=False,
+            )
+        except Exception:
+            progress_jobs.update_step(job_id, "fetch", status="failed")
+            raise
+        progress_jobs.update_step(job_id, "fetch", status="completed")
+
+        progress_jobs.update_step(job_id, "aggregate", status="running")
+        try:
+            create_takaesu_order_sheet_csv(
+                source_csv=download.downloaded_file,
+                output_csv=default_takaesu_order_sheet_csv_path(),
+                preview_limit=50,
+                write_audit=True,
+            )
+        except Exception:
+            progress_jobs.update_step(job_id, "aggregate", status="failed")
+            raise
+        progress_jobs.update_step(job_id, "aggregate", status="completed")
+        progress_jobs.finish(job_id, message="高江洲発注書を作成しました。", result={})
+
+    job_id = progress_jobs.start(
+        title="高江洲発注書 作成",
+        steps=[("fetch", "Next Engineから取得"), ("aggregate", "商品マスタ照合・集計")],
+        worker=worker,
+        workflow="inventory_takaesu_prepare",
+        metadata={"browser_mode": browser_mode, "slow_mo_ms": slow_mo_ms},
+    )
+    return {"job_id": job_id}
+
+
+@app.get("/inventory/takaesu/download")
+def inventory_takaesu_download():
+    path = default_takaesu_order_sheet_csv_path()
+    if not path.is_file():
+        return PlainTextResponse("高江洲発注書CSVがまだ作成されていません。", status_code=404)
+    return FileResponse(
+        path,
+        media_type="text/csv; charset=shift_jis",
+        filename=path.name,
+    )
+
+
+@app.get("/inventory/takaesu/download/pdf")
+def inventory_takaesu_download_pdf():
+    path = default_takaesu_order_sheet_csv_path()
+    if not path.is_file():
+        return PlainTextResponse("高江洲発注書がまだ作成されていません。", status_code=404)
+    # CSVダウンロードと同一内容を保証するため、保存済み発注書CSV(cp932)をそのまま読んでPDF化する
+    # （最新ソースからの再集計はしない＝CSVとPDFが食い違わない・ソース/マスタ依存で500にならない）。
+    try:
+        with path.open("r", encoding="cp932", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+    except Exception as exc:
+        return PlainTextResponse(f"発注書の読み込みに失敗しました: {exc}", status_code=500)
+    pdf_bytes = takaesu_order_sheet_to_pdf(rows)
+    return Response(
+        pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="takaesu_order_sheet.pdf"'},
+    )
 
 
 @app.get("/inventory/download/pdf")
@@ -319,11 +633,9 @@ def inventory_download(kind: str):
 
 @app.get("/yamato", response_class=HTMLResponse)
 def yamato_delivery(request: Request):
-    try:
-        result = preview_ne_to_yamato_conversion(preview_limit=30)
-        return _yamato_response(request, result=result)
-    except Exception as exc:
-        return _yamato_response(request, result=None, error=str(exc), status_code=500)
+    # プレビュー（商品マスタ読込を含む重い処理）はGET時に実行せず、
+    # /yamato/preview から非同期で読み込む（操作ボタンを即表示するため）。
+    return _yamato_response(request, result=None, defer_preview=True)
 
 
 def _yamato_response(
@@ -335,6 +647,7 @@ def _yamato_response(
     prepare_result=None,
     restore_result=None,
     b2_import_result=None,
+    defer_preview: bool = False,
     status_code: int = 200,
 ):
     return templates.TemplateResponse(
@@ -347,6 +660,7 @@ def _yamato_response(
             "b2_import_result": b2_import_result,
             "message": message,
             "error": error,
+            "defer_preview": defer_preview,
             "restore_order_nos_text": "\n".join(
                 _yamato_restore_order_numbers_from_prepare_result(prepare_result)
             ),
@@ -355,39 +669,84 @@ def _yamato_response(
     )
 
 
-@app.get("/clickpost", response_class=HTMLResponse)
-def clickpost_delivery(request: Request):
+@app.get("/yamato/preview", response_class=HTMLResponse)
+def yamato_preview(request: Request):
+    # GET /yamato から遅延ロードされる結果fragment。
+    # 重いプレビュー（商品マスタ読込）はここで実行する。
     try:
-        result = preview_clickpost_csv(preview_limit=30)
+        result = preview_ne_to_yamato_conversion(preview_limit=30)
         return templates.TemplateResponse(
-            "clickpost.html",
+            "_yamato_results.html",
             {
                 "request": request,
                 "result": result,
-                "prepare_result": None,
-                "upload_result": None,
-                "letterpack_pdf_result": None,
-                "browser_mode": "background",
-                "slow_mo_ms": 150,
                 "message": None,
-                "error": None,
+                "prepare_result": None,
+                "restore_result": None,
+                "b2_import_result": None,
+                "preview_error": None,
             },
         )
     except Exception as exc:
         return templates.TemplateResponse(
-            "clickpost.html",
+            "_yamato_results.html",
             {
                 "request": request,
                 "result": None,
-                "prepare_result": None,
-                "upload_result": None,
-                "letterpack_pdf_result": None,
-                "browser_mode": "background",
-                "slow_mo_ms": 150,
                 "message": None,
-                "error": str(exc),
+                "prepare_result": None,
+                "restore_result": None,
+                "b2_import_result": None,
+                "preview_error": str(exc),
             },
-            status_code=500,
+        )
+
+
+@app.get("/clickpost", response_class=HTMLResponse)
+def clickpost_delivery(request: Request):
+    # プレビュー（商品マスタ読込を含む重い処理）はGET時に実行せず、
+    # /clickpost/preview から非同期で読み込む（操作ボタンを即表示するため）。
+    return templates.TemplateResponse(
+        "clickpost.html",
+        {
+            "request": request,
+            "result": None,
+            "prepare_result": None,
+            "upload_result": None,
+            "letterpack_pdf_result": None,
+            "browser_mode": "background",
+            "slow_mo_ms": 150,
+            "message": None,
+            "error": None,
+            "defer_preview": True,
+        },
+    )
+
+
+@app.get("/clickpost/preview", response_class=HTMLResponse)
+def clickpost_preview(request: Request):
+    # GET /clickpost から遅延ロードされる結果fragment。
+    # 重いプレビュー（商品マスタ読込）はここで実行する。
+    try:
+        result = preview_clickpost_csv(preview_limit=30)
+        return templates.TemplateResponse(
+            "_clickpost_results.html",
+            {
+                "request": request,
+                "result": result,
+                "message": None,
+                "preview_error": None,
+            },
+        )
+    except Exception as exc:
+        return templates.TemplateResponse(
+            "_clickpost_results.html",
+            {
+                "request": request,
+                "result": None,
+                "message": None,
+                "preview_error": str(exc),
+            },
         )
 
 
@@ -618,6 +977,8 @@ async def clickpost_prepare(request: Request):
             headed=headed,
             slow_mo_ms=slow_mo_ms,
             preview_limit=30,
+            download_invoices=True,
+            restore_invoices_after_download=True,
         )
         return templates.TemplateResponse(
             "clickpost.html",
@@ -629,7 +990,7 @@ async def clickpost_prepare(request: Request):
                 "letterpack_pdf_result": None,
                 "browser_mode": browser_mode,
                 "slow_mo_ms": slow_mo_ms if headed else 150,
-                "message": "Next Engine から購入者データと受注明細データを取得し、clickpostimport.csv と letterpack_addressbook.csv を作成しました。",
+                "message": "Next Engine から購入者データ、受注明細データ、納品書PDFを取得し、clickpostimport.csv と letterpack_addressbook.csv を作成しました。",
                 "error": None,
             },
         )
@@ -677,11 +1038,13 @@ async def clickpost_prepare_start(request: Request):
             headed=headed,
             slow_mo_ms=slow_mo_ms,
             preview_limit=30,
+            download_invoices=True,
+            restore_invoices_after_download=True,
             progress_callback=update_progress,
         )
         progress_jobs.finish(
             job_id,
-            message="NE取得とCSV作成が完了しました。",
+            message="NE取得、納品書PDF取得、CSV作成が完了しました。",
             result={"prepare": _clickpost_prepare_summary(prepare_result)},
         )
 
@@ -690,6 +1053,7 @@ async def clickpost_prepare_start(request: Request):
         steps=[
             ("buyer_download", "NE購入者データ取得"),
             ("product_download", "NE受注明細データ取得"),
+            ("invoice_download", "NE納品書PDF取得"),
             ("clickpost_csv", "クリックポストCSV作成"),
             ("letterpack_csv", "レターパック住所CSV作成"),
         ],
@@ -795,6 +1159,8 @@ async def clickpost_full_run_start(request: Request):
             headed=headed,
             slow_mo_ms=slow_mo_ms,
             preview_limit=30,
+            download_invoices=True,
+            restore_invoices_after_download=False,
             progress_callback=update_progress,
         )
 
@@ -828,7 +1194,7 @@ async def clickpost_full_run_start(request: Request):
             progress_callback=update_progress,
         )
         message = (
-            "NE取得、レターパックPDF作成、クリックポスト本番処理が完了しました。"
+            "NE取得、納品書PDF取得、レターパックPDF作成、クリックポスト本番処理が完了しました。"
             if import_result.executed and not import_result.skipped_reason
             else "3処理まとめ実行を終了しました。結果を確認してください。"
         )
@@ -847,6 +1213,7 @@ async def clickpost_full_run_start(request: Request):
         steps=[
             ("buyer_download", "NE購入者データ取得"),
             ("product_download", "NE受注明細データ取得"),
+            ("invoice_download", "NE納品書PDF取得"),
             ("clickpost_csv", "クリックポストCSV作成"),
             ("letterpack_csv", "レターパック住所CSV作成"),
             ("letterpack_pdf", "レターパックPDF作成"),
@@ -1162,6 +1529,135 @@ async def yamato_run_selected(request: Request):
             error=str(exc),
             status_code=500,
         )
+
+
+@app.post("/yamato/run-selected/start")
+async def yamato_run_selected_start(request: Request):
+    # run-selected の非同期版。進捗をフローチップに同期表示するため、
+    # 重い処理をバックグラウンドジョブ化し、フロントは /progress をポーリングする。
+    # ステップは粗い2段階: prepare(受注取得〜CSV作成=チップ①〜⑤) / b2_import(B2取込=チップ⑥)。
+    form = await _read_form(request)
+    selected = _yamato_selected_steps(form)
+    order_numbers = _parse_order_numbers(form.get("order_nos"))
+    csv_file_raw = form.get("csv_file", "").strip()
+    headed = _form_bool(form, "headed")
+    verify_invoice_statuses = _form_bool(form, "verify_invoice_statuses")
+    confirm_import = _form_bool(form, "confirm_import") or form.get("import_mode", "execute") == "execute"
+    slow_mo_ms = _form_int(form, "slow_mo_ms", 150)
+    preview_limit = _form_int(form, "preview_limit", 30)
+
+    selected_names = [key for key, enabled in selected.items() if enabled]
+    if not selected_names:
+        return PlainTextResponse("実行する項目を1つ以上選択してください。", status_code=400)
+
+    should_prepare = any(
+        selected[key]
+        for key in (
+            "ne_order_download",
+            "ne_invoice_download",
+            "ne_custom_data_import",
+            "address_fix",
+            "csv_create",
+        )
+    )
+    do_b2 = selected["b2_login"] or selected["b2_import"]
+
+    steps: list[tuple[str, str]] = []
+    if should_prepare:
+        steps.append(("prepare", "受注取得〜B2取込CSV作成"))
+    if do_b2:
+        steps.append(("b2_import", "ヤマトB2へ取込"))
+
+    def worker(job_id: str) -> None:
+        current_result = None
+        if should_prepare:
+            progress_jobs.update_step(job_id, "prepare", status="running")
+            try:
+                prepare_result = prepare_yamato_b2_sync(
+                    fetch_next_engine=selected["ne_order_download"],
+                    execute_downloads=selected["ne_order_download"],
+                    check_invoices=selected["ne_invoice_download"],
+                    execute_invoices=selected["ne_invoice_download"],
+                    verify_invoice_statuses=verify_invoice_statuses,
+                    check_custom_shipping=selected["ne_custom_data_import"],
+                    execute_custom_shipping=selected["ne_custom_data_import"],
+                    custom_shipping_order_numbers=order_numbers,
+                    write_conversion=selected["csv_create"],
+                    output_type="D_ALL",
+                    headed=headed,
+                    slow_mo_ms=slow_mo_ms,
+                    preview_limit=preview_limit,
+                )
+            except Exception:
+                progress_jobs.update_step(job_id, "prepare", status="failed")
+                raise
+            current_result = prepare_result.conversion
+            progress_jobs.update_step(job_id, "prepare", status="completed")
+
+        b2_result = None
+        if do_b2:
+            progress_jobs.update_step(job_id, "b2_import", status="running")
+            try:
+                b2_result = import_yamato_b2_csv_sync(
+                    csv_file=Path(csv_file_raw) if csv_file_raw else None,
+                    check_login=selected["b2_login"] and not selected["b2_import"],
+                    open_import_page=False,
+                    select_file_dry_run=selected["b2_import"] and not confirm_import,
+                    execute_import=selected["b2_import"] and confirm_import,
+                    confirm_import=confirm_import,
+                    headless=not headed,
+                    slow_mo_ms=slow_mo_ms,
+                    keep_browser_open=headed,
+                )
+            except Exception:
+                progress_jobs.update_step(job_id, "b2_import", status="failed")
+                raise
+
+            # B2の実取込が要求された(execute想定)のに完了していなければ、ジョブを失敗扱いにして理由を表示する。
+            # 従来は例外が出なければ無条件に「完了」表示になり、B2失敗(skipped_reason等)が画面で分からなかった。
+            expected_execute = selected["b2_import"] and confirm_import
+            b2_executed = bool(getattr(b2_result, "import_executed", False))
+            b2_skip = getattr(b2_result, "skipped_reason", None)
+            b2_page = getattr(b2_result, "page_url", None)
+            b2_warnings = list(getattr(b2_result, "warnings", ()) or ())
+            if expected_execute and not b2_executed:
+                progress_jobs.update_step(job_id, "b2_import", status="failed", detail=b2_skip)
+                parts = [f"B2取込が完了しませんでした（理由: {b2_skip or '不明'}）。"]
+                if current_result is not None and getattr(current_result, "output_csv", None):
+                    parts.append("NEデータ取得・CSV作成は完了しています（/yamato で確認・再取込できます）。")
+                if b2_page:
+                    parts.append(f"B2画面: {b2_page}")
+                if b2_warnings:
+                    parts.append("警告: " + " / ".join(b2_warnings[:3]))
+                progress_jobs.fail(job_id, " ".join(parts))
+                return
+            progress_jobs.update_step(job_id, "b2_import", status="completed", detail=b2_skip)
+
+        message = "選択した処理を実行しました。"
+        if selected["b2_import"] and not confirm_import:
+            message += " B2インポートは確認なしのためCSV選択までです。"
+
+        result_summary: dict[str, object] = {}
+        if current_result is not None:
+            result_summary["output_csv"] = _path_text(getattr(current_result, "output_csv", None))
+            result_summary["output_rows"] = getattr(current_result, "output_rows", None)
+        if b2_result is not None:
+            result_summary["b2_import_executed"] = bool(getattr(b2_result, "import_executed", False))
+            result_summary["b2_skipped_reason"] = getattr(b2_result, "skipped_reason", None)
+        progress_jobs.finish(job_id, message=message, result=result_summary)
+
+    job_id = progress_jobs.start(
+        title="ヤマト用CSV作成",
+        steps=steps,
+        worker=worker,
+        workflow="yamato_run_selected",
+        metadata={
+            "headed": headed,
+            "slow_mo_ms": slow_mo_ms,
+            "confirm_import": confirm_import,
+        },
+    )
+    return {"job_id": job_id}
 
 
 @app.post("/yamato/restore-print-wait", response_class=HTMLResponse)

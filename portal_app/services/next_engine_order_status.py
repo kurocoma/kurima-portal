@@ -14,6 +14,7 @@ from portal_app.services.next_engine_downloader import (
     NextEngineOrderDetailDownloader,
     _chromium_launch_options,
     _headless_default,
+    _next_engine_storage_lock,
 )
 from portal_app.services.paths import find_portal_paths
 
@@ -22,6 +23,7 @@ ORDER_INPUT_URL = (
     "https://main.next-engine.com/Userjyuchu/jyuchuInp"
     "?kensaku_denpyo_no={order_no}&jyuchu_meisai_order=jyuchu_meisai_gyo"
 )
+MAIN_APP_LAUNCH_URL = "https://base.next-engine.org/apps/launch/?id=274908"
 PRINT_WAIT_STATUS = "20"
 PRINTED_STATUS = "40"
 DRAFT_STATUS = "2"
@@ -243,46 +245,47 @@ class NextEngineOrderStatusClient:
         failed: list[str] = []
         dialog_messages: list[str] = []
 
-        async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(
-                **_chromium_launch_options(self.headless, self.slow_mo_ms)
-            )
-            try:
-                context = await self._new_context(browser)
+        with _next_engine_storage_lock():
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(
+                    **_chromium_launch_options(self.headless, self.slow_mo_ms)
+                )
                 try:
-                    page = await context.new_page()
-                    page.on(
-                        "dialog",
-                        lambda dialog: asyncio.create_task(
-                            _accept_status_dialog(dialog, dialog_messages)
-                        ),
-                    )
-                    await self.login_client._login(page)
-
-                    for order_no in order_numbers:
-                        dialog_start_index = len(dialog_messages)
-                        await self._goto_order_page(
-                            page,
-                            order_no,
-                            ensure_login=False,
+                    context = await self._new_context(browser)
+                    try:
+                        page = await context.new_page()
+                        page.on(
+                            "dialog",
+                            lambda dialog: asyncio.create_task(
+                                _accept_status_dialog(dialog, dialog_messages)
+                            ),
                         )
-                        result = await self._restore_current_order_page(
-                            page,
-                            order_no,
-                            execute=execute,
-                            dialog_messages=dialog_messages,
-                            dialog_start_index=dialog_start_index,
-                        )
-                        results.append(result)
-                        final_snapshot = result.after_restore or result.after_clear or result.before
-                        if execute and final_snapshot.status_value != PRINT_WAIT_STATUS:
-                            failed.append(order_no)
+                        await self.login_client._login(page)
 
-                    await context.storage_state(path=str(STORAGE_STATE_PATH))
+                        for order_no in order_numbers:
+                            dialog_start_index = len(dialog_messages)
+                            page = await self._goto_order_page(
+                                page,
+                                order_no,
+                                ensure_login=False,
+                            )
+                            result = await self._restore_current_order_page(
+                                page,
+                                order_no,
+                                execute=execute,
+                                dialog_messages=dialog_messages,
+                                dialog_start_index=dialog_start_index,
+                            )
+                            results.append(result)
+                            final_snapshot = result.after_restore or result.after_clear or result.before
+                            if execute and final_snapshot.status_value != PRINT_WAIT_STATUS:
+                                failed.append(order_no)
+
+                        await context.storage_state(path=str(STORAGE_STATE_PATH))
+                    finally:
+                        await context.close()
                 finally:
-                    await context.close()
-            finally:
-                await browser.close()
+                    await browser.close()
 
         return OrderStatusBatchRestoreResult(
             order_numbers=order_numbers,
@@ -401,29 +404,58 @@ class NextEngineOrderStatusClient:
         order_no: str,
         *,
         ensure_login: bool = True,
-    ) -> None:
+    ) -> Page:
         if ensure_login:
-            await self.login_client._login(page)
-        await page.goto(
-            ORDER_INPUT_URL.format(order_no=order_no),
-            wait_until="domcontentloaded",
-            timeout=60000,
-        )
-        try:
-            await self._wait_order_page_fields(page)
-        except PlaywrightTimeoutError:
-            await self.login_client._login(page)
+            await self.login_client._login(page, open_main=True)
+
+        order_url = ORDER_INPUT_URL.format(order_no=order_no)
+        last_error = ""
+        for attempt in range(1, 4):
             await page.goto(
-                ORDER_INPUT_URL.format(order_no=order_no),
+                order_url,
                 wait_until="domcontentloaded",
                 timeout=60000,
             )
             try:
                 await self._wait_order_page_fields(page)
-            except PlaywrightTimeoutError:
-                await _save_order_status_debug_artifacts(page, "order_input_missing")
-                raise
-        await page.wait_for_timeout(1000)
+                await page.wait_for_timeout(1000)
+                return page
+            except PlaywrightTimeoutError as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                if attempt < 3:
+                    if "base.next-engine.org" in page.url:
+                        await self._open_main_app(page)
+                    else:
+                        await self.login_client._login(page, open_main=True)
+                    continue
+                break
+
+        screenshot, html = await _save_order_status_debug_artifacts(page, "order_input_missing")
+        title = await _safe_page_title(page)
+        excerpt = await _safe_page_excerpt(page)
+        raise RuntimeError(
+            "Next Engine order detail page did not show expected fields. "
+            f"order_no={order_no} url={page.url} title={title} last_error={last_error} "
+            f"screenshot={screenshot} html={html} body_excerpt={excerpt}"
+        )
+
+    async def _open_main_app(self, page: Page) -> None:
+        try:
+            await page.goto(MAIN_APP_LAUNCH_URL, wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(2500)
+            return
+        except Exception:
+            pass
+
+        launch_locator = page.locator(
+            'a[href*="/apps/launch/?id=274908"], a[href*="/apps/launch"][target="base_app_1"]'
+        )
+        try:
+            if await launch_locator.count() > 0:
+                await launch_locator.first.click(force=True, timeout=15000)
+                await page.wait_for_timeout(2500)
+        except Exception:
+            pass
 
     async def _wait_order_page_fields(self, page: Page) -> None:
         await page.wait_for_selector("#jyuchu_denpyo_no", timeout=30000)
@@ -484,8 +516,18 @@ class _OrderPageSession:
         self.browser: Browser | None = None
         self.context: BrowserContext | None = None
         self.page: Page
+        self.storage_lock = None
 
     async def __aenter__(self):
+        self.storage_lock = _next_engine_storage_lock()
+        self.storage_lock.__enter__()
+        try:
+            return await self._open()
+        except Exception:
+            await self.__aexit__(None, None, None)
+            raise
+
+    async def _open(self):
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.launch(
             **_chromium_launch_options(self.client.headless, self.client.slow_mo_ms)
@@ -493,17 +535,22 @@ class _OrderPageSession:
         self.context = await self.client._new_context(self.browser)
         self.page = await self.context.new_page()
         self.page.on("dialog", lambda dialog: asyncio.create_task(self._accept_dialog(dialog)))
-        await self.client._goto_order_page(self.page, self.order_no)
+        self.page = await self.client._goto_order_page(self.page, self.order_no)
         await self.context.storage_state(path=str(STORAGE_STATE_PATH))
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
-        if self.context is not None:
-            await self.context.close()
-        if self.browser is not None:
-            await self.browser.close()
-        if self.playwright is not None:
-            await self.playwright.stop()
+        try:
+            if self.context is not None:
+                await self.context.close()
+            if self.browser is not None:
+                await self.browser.close()
+            if self.playwright is not None:
+                await self.playwright.stop()
+        finally:
+            if self.storage_lock is not None:
+                self.storage_lock.__exit__(exc_type, exc, tb)
+                self.storage_lock = None
 
     async def _accept_dialog(self, dialog) -> None:
         message = dialog.message
@@ -546,12 +593,36 @@ def _append_audit(result: OrderStatusRestoreResult) -> None:
         fp.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
-async def _save_order_status_debug_artifacts(page: Page, label: str) -> None:
+async def _safe_page_title(page: Page) -> str:
+    try:
+        return await page.title()
+    except Exception:
+        return ""
+
+
+async def _safe_page_excerpt(page: Page) -> str:
+    try:
+        text = await page.locator("body").inner_text(timeout=3000)
+    except Exception:
+        return ""
+    return " ".join(text.split())[:500]
+
+
+async def _save_order_status_debug_artifacts(page: Page, label: str) -> tuple[Path | None, Path | None]:
     AUDIT_LOG_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%y%m%d%H%M%S")
     base = AUDIT_LOG_DIR / f"{label}_{timestamp}"
-    await page.screenshot(path=str(base.with_suffix(".png")), full_page=True)
-    base.with_suffix(".html").write_text(await page.content(), encoding="utf-8")
+    screenshot_path: Path | None = base.with_suffix(".png")
+    html_path: Path | None = base.with_suffix(".html")
+    try:
+        await page.screenshot(path=str(screenshot_path), full_page=True)
+    except Exception:
+        screenshot_path = None
+    try:
+        html_path.write_text(await page.content(), encoding="utf-8")
+    except Exception:
+        html_path = None
+    return screenshot_path, html_path
 
 
 def _snapshot_payload(snapshot: OrderStatusSnapshot | None) -> dict[str, object] | None:

@@ -1,0 +1,143 @@
+{# 在庫明細（通常）の結果セクション（base継承なしのfragment）。
+   GET /inventory/preview?tab=normal から遅延ロードされ、POST応答では {% include %} で再利用する。
+   preview_error は /inventory/preview の例外時のみ設定（include 時は未定義=非表示）。 #}
+{% if preview_error %}
+  <div class="note error">
+    <div class="note-title">最新の集計を読み込めませんでした</div>
+    <p>{{ preview_error }}</p>
+  </div>
+{% endif %}
+{% if result %}
+  <div class="result-bar">
+    <span class="tag-ok">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2f7d57" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+      {% if download_result %}最新データを取得しました{% else %}集計が完了しました{% endif %}
+    </span>
+    {% if result.generated_at %}<span class="result-sub">{{ result.generated_at.strftime("%Y-%m-%d %H:%M") }} 時点</span>{% endif %}
+    <a class="result-reset" href="/inventory">再集計</a>
+  </div>
+
+  {% if result.warnings %}
+    <div class="note warn mt-14">
+      <div class="note-title">確認事項</div>
+      <ul class="note-list">
+        {% for warning in result.warnings %}<li>{{ warning }}</li>{% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+
+  <div class="summary mt-14">
+    <div class="summary-card">
+      <div class="summary-k">CSV行数</div>
+      <div class="summary-v">{{ result.source_rows }}</div>
+    </div>
+    <div class="summary-card">
+      <div class="summary-k">通常商品</div>
+      <div class="summary-v">{{ result.normal_count }} <span class="unit">件</span></div>
+    </div>
+    <div class="summary-card">
+      <div class="summary-k">選べるセット</div>
+      <div class="summary-v">{{ result.choice_count }} <span class="unit">件</span></div>
+    </div>
+    <div class="summary-card{% if result.warnings %} warn{% endif %}">
+      <div class="summary-k">確認事項</div>
+      <div class="summary-v{% if not result.warnings %} calm{% endif %}">{% if result.warnings %}{{ result.warnings|length }} <span class="unit">件</span>{% else %}なし{% endif %}</div>
+    </div>
+  </div>
+
+  <div class="btn-row">
+    <a class="btn" href="/inventory/download/normal"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>通常商品CSV</a>
+    <a class="btn" href="/inventory/download/choice"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>選べるセットCSV</a>
+    <a class="btn" href="/inventory/download/pdf/normal"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>通常商品PDF</a>
+    <a class="btn" href="/inventory/download/pdf/choice"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>選べるセットPDF</a>
+  </div>
+
+  {% if download_result %}
+    <details class="fold mt-14">
+      <summary>取得の詳細<span class="fold-hint">開閉</span></summary>
+      <div class="fold-body">
+        <dl class="kv narrow">
+          <dt>実行モード</dt>
+          <dd>{% if browser_mode|default("background") == "front" %}画面表示 / slow_mo_ms={{ slow_mo_ms|default(150) }}{% else %}バックグラウンド{% endif %}</dd>
+          <dt>保存ファイル</dt>
+          <dd class="mono">{{ download_result.downloaded_file }}</dd>
+          <dt>元ファイル名</dt>
+          <dd>{{ download_result.source_filename }}</dd>
+          <dt>保存日時</dt>
+          <dd>{{ download_result.saved_at.strftime("%Y-%m-%d %H:%M:%S") }}</dd>
+        </dl>
+      </div>
+    </details>
+  {% endif %}
+
+  <details class="fold mt-14">
+    <summary>集計条件・ファイル<span class="fold-hint">開閉</span></summary>
+    <div class="fold-body">
+      <dl class="kv narrow">
+        <dt>生成日時</dt>
+        <dd>{{ result.generated_at.strftime("%Y-%m-%d %H:%M:%S") }}</dd>
+        <dt>受注明細CSV</dt>
+        <dd class="mono">{{ result.source_csv }}</dd>
+        <dt>CSV行数</dt>
+        <dd>{{ result.source_rows }}</dd>
+        <dt>商品マスタ</dt>
+        <dd class="mono">{{ result.paths.master_book }}</dd>
+      </dl>
+    </div>
+  </details>
+
+  <section class="mt-26">
+    <div class="sec-head">
+      <h2>通常商品</h2>
+      <span class="badge">{{ result.normal_count }} 件</span>
+    </div>
+    <div class="tbl-wrap">
+      <div class="tbl-scroll">
+        <table class="tbl tbl-min-560">
+          <thead>
+            <tr><th>商品コード</th><th>商品名</th><th class="num">受注数</th><th class="num">引当数</th></tr>
+          </thead>
+          <tbody>
+            {% for row in result.normal_rows %}
+              <tr>
+                <td class="mono">{{ row["商品ｺｰﾄﾞ"] }}</td>
+                <td>{{ row["商品名"] }}</td>
+                <td class="num">{{ row["受注数"] }}</td>
+                <td class="num">{{ row["引当数"] }}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="4" class="empty">対象データなし</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="mt-22">
+    <div class="sec-head">
+      <h2>選べるセット</h2>
+      <span class="badge">{{ result.choice_count }} 件</span>
+    </div>
+    <div class="tbl-wrap">
+      <div class="tbl-scroll">
+        <table class="tbl tbl-min-520">
+          <thead>
+            <tr><th>商品名</th><th class="num">発注数量</th><th>備考</th></tr>
+          </thead>
+          <tbody>
+            {% for row in result.choice_rows %}
+              <tr>
+                <td>{{ row["商品名"] }}</td>
+                <td class="num">{{ row["発注数量"] }}</td>
+                <td>{{ row["備考"] }}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="3" class="empty">対象データなし</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+{% endif %}

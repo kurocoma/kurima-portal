@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - Windows production path uses msvcrt.
+    msvcrt = None
 
 from playwright.async_api import (
     Browser,
@@ -35,6 +42,7 @@ PAYMENT_OPTION = "2 : 入金済み"
 
 APP_ROOT = Path(__file__).resolve().parents[2]
 STORAGE_STATE_PATH = APP_ROOT / "data" / "storage" / "next_engine.json"
+NEXT_ENGINE_LOCK_PATH = APP_ROOT / "data" / "storage" / "next_engine.lock"
 LOG_DIR = APP_ROOT / "logs" / "next_engine"
 CHROMIUM_EXECUTABLE_ENV = "PLAYWRIGHT_CHROMIUM_EXECUTABLE"
 CHROMIUM_EXECUTABLE_CANDIDATES = [
@@ -50,6 +58,37 @@ class NextEngineDownloadResult:
     downloaded_file: Path
     source_filename: str
     saved_at: datetime
+
+
+@contextmanager
+def _next_engine_storage_lock(timeout_seconds: float = 180.0) -> Iterator[None]:
+    NEXT_ENGINE_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    started_at = time.monotonic()
+    with NEXT_ENGINE_LOCK_PATH.open("a+b") as fp:
+        fp.seek(0, os.SEEK_END)
+        if fp.tell() == 0:
+            fp.write(b"\0")
+            fp.flush()
+
+        if msvcrt is None:
+            yield
+            return
+
+        while True:
+            try:
+                fp.seek(0)
+                msvcrt.locking(fp.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except OSError as exc:
+                if time.monotonic() - started_at >= timeout_seconds:
+                    raise TimeoutError("Next Engine storage state lock timed out.") from exc
+                time.sleep(0.5)
+
+        try:
+            yield
+        finally:
+            fp.seek(0)
+            msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 async def download_next_engine_order_details(
@@ -145,35 +184,41 @@ class NextEngineOrderDetailDownloader:
         self.credential = load_next_engine_credential()
 
     async def run(self) -> NextEngineDownloadResult:
-        STORAGE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with _next_engine_storage_lock():
+            STORAGE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-        async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(
-                **_chromium_launch_options(self.headless, self.slow_mo_ms)
-            )
-            try:
-                context = await self._new_context(browser)
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(
+                    **_chromium_launch_options(self.headless, self.slow_mo_ms)
+                )
                 try:
-                    page = await context.new_page()
-                    _auto_accept_dialogs(page)
+                    context = await self._new_context(browser)
+                    try:
+                        page = await context.new_page()
+                        if not self.headless:
+                            await _bring_page_to_front(page)
+                        _auto_accept_dialogs(page)
 
-                    await self._login(page)
-                    result = await self._download_order_detail_csv(page)
+                        await self._login(page)
+                        result = await self._download_order_detail_csv(page)
 
-                    await context.storage_state(path=str(STORAGE_STATE_PATH))
-                    return result
+                        await context.storage_state(path=str(STORAGE_STATE_PATH))
+                        return result
+                    finally:
+                        await context.close()
                 finally:
-                    await context.close()
-            finally:
-                await browser.close()
+                    await browser.close()
 
     async def _new_context(self, browser: Browser) -> BrowserContext:
         kwargs: dict[str, object] = {
             "accept_downloads": True,
             "locale": "ja-JP",
-            "viewport": {"width": 1366, "height": 900},
         }
+        if self.headless:
+            kwargs["viewport"] = {"width": 1366, "height": 900}
+        else:
+            kwargs["no_viewport"] = True
         if STORAGE_STATE_PATH.exists():
             kwargs["storage_state"] = str(STORAGE_STATE_PATH)
         return await browser.new_context(**kwargs)
@@ -556,6 +601,51 @@ def _auto_accept_dialogs(page: Page) -> None:
     page.on("dialog", lambda dialog: asyncio.create_task(accept_dialog(dialog)))
 
 
+async def _bring_page_to_front(page: Page) -> None:
+    try:
+        await page.bring_to_front()
+    except Exception:
+        pass
+
+    try:
+        session = await page.context.new_cdp_session(page)
+        try:
+            target_window = await session.send("Browser.getWindowForTarget")
+            window_id = target_window.get("windowId")
+            if window_id is not None:
+                await session.send(
+                    "Browser.setWindowBounds",
+                    {
+                        "windowId": window_id,
+                        "bounds": {"windowState": "maximized"},
+                    },
+                )
+        finally:
+            await session.detach()
+    except Exception:
+        pass
+
+    try:
+        await page.evaluate(
+            """
+            () => {
+              window.focus();
+              if (window.screen) {
+                window.moveTo(0, 0);
+                window.resizeTo(window.screen.availWidth, window.screen.availHeight);
+              }
+            }
+            """
+        )
+    except Exception:
+        pass
+
+    try:
+        await page.bring_to_front()
+    except Exception:
+        pass
+
+
 def _headless_default() -> bool:
     raw = os.environ.get("NEXT_ENGINE_HEADLESS", "true").strip().lower()
     return raw not in {"0", "false", "no", "off"}
@@ -566,6 +656,11 @@ def _chromium_launch_options(headless: bool, slow_mo_ms: int) -> dict[str, objec
         "headless": headless,
         "slow_mo": slow_mo_ms,
     }
+    if not headless:
+        options["args"] = [
+            "--start-maximized",
+            "--window-position=0,0",
+        ]
 
     executable_path = _find_chromium_executable()
     if executable_path is not None:

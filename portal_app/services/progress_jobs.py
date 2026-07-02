@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from threading import Lock, Thread
@@ -10,6 +12,23 @@ from portal_app.services.execution_logger import ExecutionLogger, exception_payl
 
 
 JobWorker = Callable[[str], None]
+
+
+def _ensure_subprocess_event_loop_policy() -> None:
+    """Windows の worker スレッドで Playwright のサブプロセス起動を可能にする。
+
+    uvicorn プロセスでは event loop policy が SelectorEventLoop 系になっており、
+    worker スレッドの asyncio.run が作るループが subprocess 非対応のため、
+    Playwright のブラウザ起動が NotImplementedError になる。ProactorEventLoop を保証する。
+    （既存ループには影響しない＝新規に作られる worker のループにのみ効く）
+    """
+    if sys.platform != "win32":
+        return
+    proactor_policy = getattr(asyncio, "WindowsProactorEventLoopPolicy", None)
+    if proactor_policy is None:
+        return
+    if not isinstance(asyncio.get_event_loop_policy(), proactor_policy):
+        asyncio.set_event_loop_policy(proactor_policy())
 
 
 @dataclass
@@ -74,6 +93,7 @@ class ProgressJobStore:
         return job_id
 
     def _run_worker(self, job_id: str, worker: JobWorker) -> None:
+        _ensure_subprocess_event_loop_policy()
         self.set_running(job_id, "処理を開始しました。")
         try:
             worker(job_id)

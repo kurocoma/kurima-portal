@@ -1,334 +1,258 @@
 {% extends "base.html" %}
 {% block title %}ヤマト伝票 - くりまポータルツール{% endblock %}
 {% block content %}
-<section class="section">
-  <div class="section-head">
-    <div>
-      <p class="eyebrow">Yamato B2</p>
-      <h1>ヤマト伝票</h1>
-    </div>
-    <div class="action-row">
-      <a class="button" href="/yamato">再読み込み</a>
-    </div>
+<div class="page-head">
+  <h1 class="page-title">ヤマト伝票</h1>
+  <svg class="page-wave" width="62" height="8" viewBox="0 0 62 8" fill="none"><path d="M2 5C8 1.5 13 1.5 19 5s11 3.5 17 0 11-3.5 17 0 5 1 5 1" stroke="#3bb0d4" stroke-width="2" stroke-linecap="round"/></svg>
+  <p class="page-lead">印刷待ちの受注からヤマトB2の取込データを作成します。</p>
+</div>
+
+{% if error %}
+  <div class="note error">
+    <div class="note-title">処理が止まりました</div>
+    <p>{{ error }}</p>
+  </div>
+{% endif %}
+
+<section class="panel{% if error %} mt-14{% endif %}">
+  <h2 class="panel-title">ヤマト用CSVを作成する</h2>
+  <p class="panel-lead">この操作で、下記の流れを順に実行します。</p>
+  <div class="flow">
+    <span class="flow-chip" data-chip="1"><span class="flow-num">1</span>NEデータ取得</span>
+    <span class="flow-chip" data-chip="2"><span class="flow-num">2</span>納品書PDF取得</span>
+    <span class="flow-chip" data-chip="3"><span class="flow-num">3</span>配送情報CSV取得</span>
+    <span class="flow-chip" data-chip="4"><span class="flow-num">4</span>住所補正</span>
+    <span class="flow-chip" data-chip="5"><span class="flow-num">5</span>B2取込CSV作成</span>
+    <span class="flow-chip" data-chip="6"><span class="flow-num">6</span>B2へ取込</span>
   </div>
 
-  {% if error %}
-    <div class="status-panel error">
-      <h2>エラー</h2>
-      <p>{{ error }}</p>
+  <form method="post" action="/yamato/run-selected" data-progress-form data-progress-endpoint="/yamato/run-selected/start">
+    <input type="hidden" name="import_mode" value="execute">
+    <input type="hidden" name="slow_mo_ms" value="150">
+    <input type="hidden" name="preview_limit" value="30">
+
+    <div class="cta-wrap">
+      <button class="btn-cta" type="submit">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 4 20 12 6 20 6 4"/></svg>
+        ヤマト用CSVを作成する
+      </button>
+      <span class="run-note">所要 約3〜5分・完了後にB2取込まで進みます</span>
     </div>
-  {% endif %}
 
-  {% if message %}
-    <div class="status-panel ok">
-      <h2>完了</h2>
-      <p>{{ message }}</p>
-    </div>
-  {% endif %}
-
-  <div class="status-panel run-panel">
-    <h2>一括実行</h2>
-    <form class="stack-form" method="post" action="/yamato/run-selected">
-      <input type="hidden" name="headed" value="on">
-      <input type="hidden" name="import_mode" value="execute">
-      <input type="hidden" name="slow_mo_ms" value="150">
-      <input type="hidden" name="preview_limit" value="30">
-      <div class="primary-run">
-        <button class="button primary run-button" type="submit">実行</button>
-        {% if result %}
-          <span class="badge">直近CSV {{ result.output_rows }}件</span>
-        {% endif %}
-      </div>
-
-      <details class="settings-details">
-        <summary>設定</summary>
-        <div class="settings-body">
-          <div class="workflow-grid">
-            <label class="workflow-group workflow-toggle">
-              <input type="checkbox" name="next_engine_workflow" checked>
-              <span>
-                <strong>ネクストエンジン側の処理</strong>
-                <small>neダウンロード(受注データ)、neダウンロード(納品書ダウンロード)、カスタムデータをインポート</small>
-              </span>
-            </label>
-
-            <label class="workflow-group workflow-toggle">
-              <input type="checkbox" name="shipping_conversion_workflow" checked>
-              <span>
-                <strong>配送情報の変換</strong>
-                <small>住所のデータ修正、csv作成</small>
-              </span>
-            </label>
-
-            <label class="workflow-group workflow-toggle">
-              <input type="checkbox" name="yamato_import_workflow" checked>
-              <span>
-                <strong>ヤマトインポート</strong>
-                <small>B2ログイン、インポート作業</small>
-              </span>
-            </label>
-          </div>
-          <label class="workflow-group workflow-toggle">
-            <input type="checkbox" name="verify_invoice_statuses">
-            <span>
-              <strong>納品書ステータス詳細確認</strong>
-              <small>検証時のみ使用します。対象伝票を1件ずつ開き、納品書PDFの前後ステータスを記録します。</small>
-            </span>
-          </label>
-          <p class="field-note">ネクストエンジン側は印刷待ち一覧でヤマトB2v6発送方法の対象全件を処理します。通常は設定を開かずに実行ボタンだけで最後まで処理します。</p>
-        </div>
-      </details>
-    </form>
-  </div>
-
-  <details class="settings-details secondary-settings">
-    <summary>納品書印刷待ちへ復旧</summary>
-    <div class="settings-body">
-      <form class="stack-form" method="post" action="/yamato/restore-print-wait">
-        <input type="hidden" name="headed" value="on">
-        <div class="form-grid restore-grid">
-          <label>
-            <span>対象伝票番号</span>
-            <textarea name="order_nos" rows="3" placeholder="68303&#10;68301">{{ restore_order_nos_text }}</textarea>
-          </label>
-          <label>
-            <span>slow_mo_ms</span>
-            <input type="number" name="slow_mo_ms" value="150" min="0" step="50">
-          </label>
-          <label>
-            <span>復旧モード</span>
-            <select name="restore_mode">
-              <option value="check">確認のみ</option>
-              <option value="execute">実行する</option>
-            </select>
-          </label>
-        </div>
-        <div class="action-row left">
-          <button class="button primary" type="submit">復旧確認 / 実行</button>
-        </div>
-      </form>
-    </div>
-  </details>
-
-  {% if prepare_result or b2_import_result or restore_result or result %}
-    <details class="settings-details result-details">
-      <summary>結果詳細</summary>
-      <div class="settings-body">
-        {% if prepare_result %}
-          <div class="status-panel {% if prepare_result.consistency_warnings %}warn{% else %}ok{% endif %}">
-            <h2>ネクストエンジン / 変換結果</h2>
-            <dl class="meta-grid">
-              <dt>購入者データ</dt>
-              <dd>{% if prepare_result.buyer %}{{ prepare_result.buyer.snapshot.count }}件{% if prepare_result.buyer.downloaded_file %} / {{ prepare_result.buyer.downloaded_file }}{% endif %}{% else %}未実行{% endif %}</dd>
-              <dt>商品情報データ</dt>
-              <dd>{% if prepare_result.product %}{{ prepare_result.product.snapshot.count }}件{% if prepare_result.product.downloaded_file %} / {{ prepare_result.product.downloaded_file }}{% endif %}{% else %}未実行{% endif %}</dd>
-              <dt>納品書PDF</dt>
-              <dd>{% if prepare_result.invoice %}{{ prepare_result.invoice.before_list.count }}件{% if prepare_result.invoice.downloaded_file %} / {{ prepare_result.invoice.downloaded_file }}{% endif %}{% if prepare_result.invoice.skipped_reason %} / {{ prepare_result.invoice.skipped_reason }}{% endif %}{% else %}未実行{% endif %}</dd>
-              <dt>配送情報CSV</dt>
-              <dd>{% if prepare_result.custom_shipping %}{% if prepare_result.custom_shipping.downloaded_file %}{{ prepare_result.custom_shipping.downloaded_file }}{% elif prepare_result.custom_shipping.skipped_reason %}{{ prepare_result.custom_shipping.skipped_reason }}{% else %}確認済{% endif %}{% else %}未実行{% endif %}</dd>
-              <dt>B2取込CSV</dt>
-              <dd>{% if prepare_result.conversion.output_csv %}{{ prepare_result.conversion.output_csv }}{% else %}未作成{% endif %}</dd>
-              <dt>監査ログ</dt>
-              <dd>{{ prepare_result.audit_path }}</dd>
-            </dl>
-            {% if prepare_result.consistency_warnings %}
-              <ul class="compact-list warning-list">
-                {% for warning in prepare_result.consistency_warnings %}
-                  <li>{{ warning }}</li>
-                {% endfor %}
-              </ul>
-            {% endif %}
-          </div>
-        {% endif %}
-
-        {% if b2_import_result %}
-          <div class="status-panel {% if b2_import_result.skipped_reason or b2_import_result.warnings %}warn{% else %}ok{% endif %}">
-            <h2>B2インポート結果</h2>
-            <dl class="meta-grid">
-              <dt>ステップ</dt>
-              <dd>{{ b2_import_result.step }}</dd>
-              <dt>CSV</dt>
-              <dd>{{ b2_import_result.csv_file }}</dd>
-              <dt>行数</dt>
-              <dd>{{ b2_import_result.source_rows }}件</dd>
-              <dt>取込可能</dt>
-              <dd>{{ b2_import_result.ready_to_import }}</dd>
-              <dt>ブラウザ実行</dt>
-              <dd>{{ b2_import_result.browser_executed }}</dd>
-              <dt>CSV選択</dt>
-              <dd>{{ b2_import_result.file_selected }}</dd>
-              <dt>実取込</dt>
-              <dd>{{ b2_import_result.import_executed }}</dd>
-              <dt>状態</dt>
-              <dd>{{ b2_import_result.skipped_reason or "確認済み" }}</dd>
-              <dt>画面URL</dt>
-              <dd>{{ b2_import_result.page_url or "-" }}</dd>
-              <dt>監査ログ</dt>
-              <dd>{{ b2_import_result.audit_path }}</dd>
-              <dt>デバッグHTML</dt>
-              <dd>{{ b2_import_result.html_path or "-" }}</dd>
-              <dt>スクリーンショット</dt>
-              <dd>{{ b2_import_result.screenshot_path or "-" }}</dd>
-            </dl>
-            {% if b2_import_result.warnings %}
-              <ul class="compact-list warning-list">
-                {% for warning in b2_import_result.warnings %}
-                  <li>{{ warning }}</li>
-                {% endfor %}
-              </ul>
-            {% endif %}
-          </div>
-        {% endif %}
-
-        {% if restore_result %}
-          <div class="status-panel {% if restore_result.failed_order_numbers %}warn{% else %}ok{% endif %}">
-            <h2>復旧結果</h2>
-            <dl class="meta-grid">
-              <dt>対象件数</dt>
-              <dd>{{ restore_result.order_numbers|length }}</dd>
-              <dt>実行</dt>
-              <dd>{{ restore_result.executed }}</dd>
-              <dt>失敗</dt>
-              <dd>{% if restore_result.failed_order_numbers %}{{ restore_result.failed_order_numbers|join(", ") }}{% else %}なし{% endif %}</dd>
-              <dt>監査ログ</dt>
-              <dd>{% if restore_result.audit_path %}{{ restore_result.audit_path }}{% else %}未記録{% endif %}</dd>
-            </dl>
-            <div class="table-wrap compact-table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>伝票番号</th>
-                    <th>復旧前</th>
-                    <th>復旧後</th>
-                    <th>結果</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {% for item in restore_result.results %}
-                    {% set final = item.after_restore or item.after_clear or item.before %}
-                    <tr>
-                      <td>{{ item.order_no }}</td>
-                      <td>{{ item.before.status_text }}</td>
-                      <td>{{ final.status_text }}</td>
-                      <td>{% if item.skipped_reason %}{{ item.skipped_reason }}{% elif item.changed %}変更{% else %}変更なし{% endif %}</td>
-                    </tr>
-                  {% endfor %}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        {% endif %}
-
-        {% if result %}
-          <div class="status-panel {% if result.warnings %}warn{% else %}ok{% endif %}">
-            <h2>変換概要</h2>
-            <dl class="meta-grid">
-              <dt>変換元CSV</dt>
-              <dd>{{ result.source_csv }}</dd>
-              <dt>商品マスタ</dt>
-              <dd>{{ result.master_book }}</dd>
-              <dt>入力行数</dt>
-              <dd>{{ result.source_rows }}</dd>
-              <dt>出力行数</dt>
-              <dd>{{ result.output_rows }}</dd>
-              <dt>重複除外</dt>
-              <dd>{{ result.duplicate_rows_removed }}</dd>
-              <dt>住所自動補正</dt>
-              <dd>{{ result.address_adjusted_rows }}</dd>
-              <dt>住所要確認</dt>
-              <dd>{{ result.address_review_rows }}</dd>
-              <dt>出力CSV</dt>
-              <dd>{% if result.output_csv %}{{ result.output_csv }}{% else %}未作成{% endif %}</dd>
-              <dt>監査ログ</dt>
-              <dd>{% if result.audit_path %}{{ result.audit_path }}{% else %}未記録{% endif %}</dd>
-            </dl>
-            {% if result.warnings %}
-              <ul class="compact-list warning-list">
-                {% for warning in result.warnings %}
-                  <li>{{ warning }}</li>
-                {% endfor %}
-              </ul>
-            {% endif %}
-          </div>
-        {% endif %}
-
-        {% if result and result.address_reviews %}
-          <section class="data-section">
-            <div class="table-head">
-              <h2>住所補正結果</h2>
-              <span class="badge">{{ result.address_reviews|length }}件</span>
-            </div>
-            <div class="table-wrap">
-              <table class="wide-table">
-                <thead>
-                  <tr>
-                    <th>状態</th>
-                    <th>CSV行</th>
-                    <th>管理番号</th>
-                    <th>宛名</th>
-                    <th>補正前住所</th>
-                    <th>補正前建物名</th>
-                    <th>補正後住所</th>
-                    <th>補正後建物名</th>
-                    <th>理由</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {% for item in result.address_reviews %}
-                    <tr class="{% if item.requires_review %}row-warn{% endif %}">
-                      <td>{% if item.requires_review %}要確認{% else %}自動補正{% endif %}</td>
-                      <td class="number">{{ item.row_number }}</td>
-                      <td>{{ item.order_no }}</td>
-                      <td>{{ item.destination_name }}</td>
-                      <td>{{ item.original_address }}</td>
-                      <td>{{ item.original_building }}</td>
-                      <td>{{ item.adjusted_address }}</td>
-                      <td>{{ item.adjusted_building }}</td>
-                      <td>{{ item.reasons|join(" / ") }}</td>
-                    </tr>
-                  {% endfor %}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        {% endif %}
-
-        {% if result %}
-          <section class="data-section">
-            <div class="table-head">
-              <h2>変換プレビュー</h2>
-              <span class="badge">{{ result.preview_rows|length }}件表示</span>
-            </div>
-            <div class="table-wrap">
-              <table class="wide-table">
-                <thead>
-                  <tr>
-                    {% if result.preview_rows %}
-                      {% for column in result.preview_rows[0].keys() %}
-                        <th>{{ column }}</th>
-                      {% endfor %}
-                    {% endif %}
-                  </tr>
-                </thead>
-                <tbody>
-                  {% for row in result.preview_rows %}
-                    <tr>
-                      {% for value in row.values() %}
-                        <td>{{ value }}</td>
-                      {% endfor %}
-                    </tr>
-                  {% else %}
-                    <tr>
-                      <td class="empty">表示するデータがありません。</td>
-                    </tr>
-                  {% endfor %}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        {% endif %}
+    <details class="adv-fold">
+      <summary>
+        <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#a79c8f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+        詳細設定（通常は変更不要）
+      </summary>
+      <div class="adv-body">
+        <p class="adv-note">実行する範囲を絞りたいときだけ調整します。通常はすべて有効のままで構いません。</p>
+        <label class="opt">
+          <input type="checkbox" name="next_engine_workflow" checked>
+          <span>
+            <strong class="opt-title">ネクストエンジン側の処理</strong>
+            <span class="opt-desc">受注データ取得・納品書PDF取得・配送情報CSV取込</span>
+          </span>
+        </label>
+        <label class="opt">
+          <input type="checkbox" name="shipping_conversion_workflow" checked>
+          <span>
+            <strong class="opt-title">住所補正とCSV作成</strong>
+            <span class="opt-desc">住所データの補正・B2取込CSVの作成</span>
+          </span>
+        </label>
+        <label class="opt">
+          <input type="checkbox" name="yamato_import_workflow" checked>
+          <span>
+            <strong class="opt-title">ヤマトB2への取込</strong>
+            <span class="opt-desc">B2へログインし、作成したCSVを取り込みます</span>
+          </span>
+        </label>
+        <label class="opt plain">
+          <input type="checkbox" name="verify_invoice_statuses">
+          <span>
+            <strong class="opt-title">納品書ステータスの詳細確認</strong>
+            <span class="opt-desc">検証時のみ。対象を1件ずつ開いて前後ステータスを記録します。</span>
+          </span>
+        </label>
       </div>
     </details>
-  {% endif %}
+  </form>
 </section>
+
+<details class="fold mt-14">
+  <summary>
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#a79c8f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+    その他の操作 ・ 納品書印刷待ちへ復旧
+    <span class="fold-hint">開閉</span>
+  </summary>
+  <div class="fold-body">
+    <p class="maint-note">検証などで進めた伝票を、納品書印刷待ちのステータスへ戻します。対象の伝票番号を改行で入力してください。状態を変更する操作のため、通常の本番作成では使いません。</p>
+    <form method="post" action="/yamato/restore-print-wait">
+      <input type="hidden" name="slow_mo_ms" value="150">
+      <div class="field-row">
+        <label class="field grow">
+          <span class="field-label">対象伝票番号</span>
+          <textarea class="textarea" name="order_nos" rows="3" placeholder="68303&#10;68301">{{ restore_order_nos_text }}</textarea>
+        </label>
+        <label class="field">
+          <span class="field-label">モード</span>
+          <select class="select" name="restore_mode">
+            <option value="check">確認のみ</option>
+            <option value="execute">実行する</option>
+          </select>
+        </label>
+        <button class="btn" type="submit">復旧を確認 / 実行</button>
+      </div>
+    </form>
+  </div>
+</details>
+
+<div id="progress-panel" class="progress-panel mt-14" hidden>
+  <div class="progress-head">
+    <div>
+      <h2 id="progress-title">処理状況</h2>
+      <p id="progress-message" class="progress-message">開始待ちです。</p>
+    </div>
+    <span id="progress-status" class="badge">待機中</span>
+  </div>
+  <ol id="progress-steps" class="progress-steps"></ol>
+  <p id="progress-error" class="progress-error" hidden></p>
+</div>
+
+{% if defer_preview %}
+  <div class="lazy-slot" data-lazy="/yamato/preview">
+    <span class="lazy-spinner" aria-hidden="true"></span>最新の変換データを読み込み中…
+  </div>
+{% else %}
+  {% include "_yamato_results.html" %}
+{% endif %}
+
+<script>
+(() => {
+  const panel = document.getElementById("progress-panel");
+  if (!panel) return;
+  const title = document.getElementById("progress-title");
+  const message = document.getElementById("progress-message");
+  const statusBadge = document.getElementById("progress-status");
+  const stepsList = document.getElementById("progress-steps");
+  const errorBox = document.getElementById("progress-error");
+  const forms = document.querySelectorAll("[data-progress-form]");
+
+  // 粗い2段階: prepare=受注取得〜CSV作成(チップ①〜⑤), b2_import=B2取込(チップ⑥)
+  const flowChips = [...document.querySelectorAll(".flow [data-chip]")];
+  const STEP_CHIPS = { prepare: [1, 2, 3, 4, 5], b2_import: [6] };
+  const clearFlowChips = () => {
+    for (const chip of flowChips) chip.classList.remove("is-active", "is-done", "is-failed");
+  };
+  const updateFlowChips = (job) => {
+    const byChip = {};
+    for (const step of job.steps || []) {
+      for (const n of STEP_CHIPS[step.key] || []) {
+        (byChip[n] = byChip[n] || []).push(step.status);
+      }
+    }
+    for (const chip of flowChips) {
+      const n = Number(chip.dataset.chip);
+      const st = byChip[n] || [];
+      chip.classList.remove("is-active", "is-done", "is-failed");
+      if (!st.length) continue;
+      if (st.includes("failed")) chip.classList.add("is-failed");
+      else if (st.includes("running")) chip.classList.add("is-active");
+      else if (st.every((s) => s === "completed")) chip.classList.add("is-done");
+      else if (st.includes("completed")) chip.classList.add("is-active");
+    }
+  };
+
+  const statusLabels = { queued: "待機中", running: "処理中", completed: "完了", failed: "エラー", pending: "待機中" };
+  const stepLabels = { pending: "待機中", running: "処理中", completed: "完了", failed: "エラー" };
+
+  const render = (job) => {
+    panel.hidden = false;
+    panel.classList.toggle("ok", job.status === "completed");
+    panel.classList.toggle("error", job.status === "failed");
+    panel.classList.toggle("warn", job.status === "running" || job.status === "queued");
+    title.textContent = job.title || "処理状況";
+    message.textContent = job.message || "";
+    statusBadge.textContent = statusLabels[job.status] || job.status;
+    stepsList.innerHTML = "";
+    for (const step of job.steps || []) {
+      const item = document.createElement("li");
+      item.className = `progress-step is-${step.status}`;
+      const dot = document.createElement("span");
+      dot.className = "step-dot";
+      const body = document.createElement("div");
+      const label = document.createElement("strong");
+      label.textContent = step.label;
+      const detail = document.createElement("small");
+      detail.textContent = `${stepLabels[step.status] || step.status}${step.detail ? " - " + step.detail : ""}`;
+      body.append(label, detail);
+      item.append(dot, body);
+      stepsList.appendChild(item);
+    }
+    errorBox.hidden = !job.error;
+    errorBox.textContent = job.error || "";
+    updateFlowChips(job);
+  };
+
+  const enableButtons = () => {
+    for (const button of document.querySelectorAll("[data-progress-form] button")) button.disabled = false;
+  };
+
+  const poll = async (jobId) => {
+    const response = await fetch(`/progress/${jobId}`, { cache: "no-store" });
+    if (!response.ok) throw new Error("進捗を取得できませんでした。");
+    const job = await response.json();
+    render(job);
+    if (job.status === "completed") {
+      message.textContent = "完了しました。最新の結果を読み込みます…";
+      setTimeout(() => window.location.assign("/yamato"), 900);
+      return;
+    }
+    if (job.status === "failed") {
+      enableButtons();
+      return;
+    }
+    setTimeout(() => poll(jobId).catch(showError), 1000);
+  };
+
+  const showError = (error) => {
+    clearFlowChips();
+    panel.hidden = false;
+    panel.classList.remove("ok", "warn");
+    panel.classList.add("error");
+    title.textContent = "処理状況";
+    message.textContent = "進捗表示でエラーが発生しました。";
+    statusBadge.textContent = "エラー";
+    errorBox.hidden = false;
+    errorBox.textContent = error.message || String(error);
+    enableButtons();
+  };
+
+  for (const form of forms) {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const endpoint = form.dataset.progressEndpoint;
+      if (!endpoint) { form.submit(); return; }
+      // 送信ボタンの name=headed value=on を含めるため、ボタンを無効化する「前」に本文を構築する
+      // （無効化された control は entry list から除外されるため）。さらに fetch に FormData を渡すと
+      // multipart になりサーバーの parse_qs が読めないので、URLSearchParams で urlencoded 送信する。
+      const body = new URLSearchParams(new FormData(form, event.submitter));
+      for (const button of document.querySelectorAll("[data-progress-form] button")) button.disabled = true;
+      clearFlowChips();
+      render({ title: "ヤマト用CSV作成", status: "queued", message: "ジョブを開始しています。", steps: [] });
+      try {
+        const response = await fetch(endpoint, { method: "POST", body });
+        if (!response.ok) {
+          const text = await response.text().catch(() => "");
+          throw new Error(text || "処理を開始できませんでした。");
+        }
+        const payload = await response.json();
+        await poll(payload.job_id);
+      } catch (error) {
+        showError(error);
+      }
+    });
+  }
+})();
+</script>
 {% endblock %}
