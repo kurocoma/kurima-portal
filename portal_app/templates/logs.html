@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}ログ一覧 - くりまポータルツール{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1 class="page-title">ログ一覧</h1>
+  <p class="page-lead">
+    logs フォルダのファイルを更新が新しい順に表示します（最新200件 / 全{{ total_count }}件）。
+    エラー・デバッグ出力の調査はここから始めてください。
+  </p>
+</div>
+
+<div class="tbl-wrap mt-16">
+  <div class="tbl-scroll">
+    <table class="tbl tbl-min-680">
+      <thead>
+        <tr>
+          <th>更新日時</th>
+          <th>ファイル</th>
+          <th class="num">サイズ</th>
+          <th>表示</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if entries %}
+          {% for entry in entries %}
+          <tr>
+            <td class="mono">{{ entry.updated_at }}</td>
+            <td class="mono" style="word-break:break-all;">{{ entry.rel }}</td>
+            <td class="num">{{ "{:,}".format(entry.size) }} B</td>
+            <td>
+              {% if entry.viewable %}
+                <a class="text-link" href="{{ entry.view_url }}">表示</a>
+              {% else %}
+                <span style="color:var(--muted-3);font-size:12px;">非テキスト</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        {% else %}
+          <tr><td class="empty" colspan="4">ログファイルはまだありません。</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}ログ表示 - くりまポータルツール{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1 class="page-title">ログ表示</h1>
+  <p class="page-lead mono" style="word-break:break-all;">logs/{{ rel_path }}</p>
+</div>
+
+<p class="mt-10" style="font-size:12.5px;color:var(--muted-2);">
+  <a class="text-link" href="/logs">← ログ一覧へ戻る</a>
+  ／ サイズ {{ "{:,}".format(size) }} B ／ 更新 {{ updated_at }}
+</p>
+
+{% if truncated %}
+<div class="note warn mt-12">
+  <div class="note-title">先頭のみ表示しています</div>
+  <p>ファイルが大きいため、先頭 {{ "{:,}".format(max_bytes) }} バイトのみ表示しています。全文はファイルを直接開いてください。</p>
+</div>
+{% endif %}
+
+<div class="tbl-wrap mt-12" style="padding:14px 16px;">
+  <pre class="mono" style="margin:0;font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-all;overflow-x:auto;">{{ content }}</pre>
+</div>
+{% endblock %}

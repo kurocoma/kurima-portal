@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import csv
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, quote
 
@@ -49,6 +50,20 @@ from portal_app.services.yamato_conversion import (
 
 APP_DIR = Path(__file__).resolve().parent
 LOGS_ROOT = APP_DIR.parent / "logs"
+LOG_VIEW_MAX_BYTES = 200_000
+LOG_VIEW_TEXT_SUFFIXES = {
+    ".log",
+    ".txt",
+    ".jsonl",
+    ".json",
+    ".err",
+    ".out",
+    ".csv",
+    ".md",
+    ".html",
+    ".yaml",
+    ".yml",
+}
 
 app = FastAPI(title="くりまポータルツール")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
@@ -1779,6 +1794,95 @@ def jobs_history(request: Request):
         {
             "request": request,
             "rows": rows,
+        },
+    )
+
+
+def _resolve_log_path(raw: str) -> Path | None:
+    """?path= で受けた相対パスを logs/ 配下に正規化する。
+
+    resolve() 後に logs ルート配下であることを検証し、
+    `..%2F.env` のようなパストラバーサルや絶対パス指定を拒否する（None を返す）。
+    """
+    if not raw:
+        return None
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        return None
+    try:
+        logs_root = LOGS_ROOT.resolve()
+        resolved = (LOGS_ROOT / candidate).resolve()
+    except OSError:
+        return None
+    if resolved == logs_root or not resolved.is_relative_to(logs_root):
+        return None
+    return resolved
+
+
+@app.get("/logs", response_class=HTMLResponse)
+def logs_index(request: Request):
+    # logs/ 配下のファイルを更新日時の新しい順に一覧する（エラー調査の入口）。
+    entries: list[dict[str, object]] = []
+    if LOGS_ROOT.is_dir():
+        for path in LOGS_ROOT.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            rel = path.relative_to(LOGS_ROOT).as_posix()
+            entries.append(
+                {
+                    "rel": rel,
+                    "mtime": stat.st_mtime,
+                    "updated_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                    "size": stat.st_size,
+                    "viewable": path.suffix.lower() in LOG_VIEW_TEXT_SUFFIXES,
+                    "view_url": f"/logs/view?path={quote(rel)}",
+                }
+            )
+    entries.sort(key=lambda entry: entry["mtime"], reverse=True)
+    return templates.TemplateResponse(
+        "logs.html",
+        {
+            "request": request,
+            "entries": entries[:200],
+            "total_count": len(entries),
+        },
+    )
+
+
+@app.get("/logs/view", response_class=HTMLResponse)
+def logs_view(request: Request, path: str = ""):
+    resolved = _resolve_log_path(path)
+    if resolved is None:
+        return PlainTextResponse("不正なパスです。logs/ 配下の相対パスのみ指定できます。", status_code=400)
+    if not resolved.is_file():
+        return PlainTextResponse("ログファイルが見つかりません。", status_code=404)
+    if resolved.suffix.lower() not in LOG_VIEW_TEXT_SUFFIXES:
+        return PlainTextResponse("テキスト形式のログのみ表示できます。", status_code=400)
+
+    try:
+        stat = resolved.stat()
+        with resolved.open("rb") as handle:
+            raw = handle.read(LOG_VIEW_MAX_BYTES)
+    except OSError as exc:
+        return PlainTextResponse(f"ログの読み込みに失敗しました: {exc}", status_code=500)
+
+    truncated = stat.st_size > LOG_VIEW_MAX_BYTES
+    # 表示はテンプレート側の autoescape に任せる（HTMLログも生埋め込みしない）。
+    content = raw.decode("utf-8", errors="replace")
+    return templates.TemplateResponse(
+        "log_view.html",
+        {
+            "request": request,
+            "rel_path": resolved.relative_to(LOGS_ROOT.resolve()).as_posix(),
+            "content": content,
+            "size": stat.st_size,
+            "updated_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            "truncated": truncated,
+            "max_bytes": LOG_VIEW_MAX_BYTES,
         },
     )
 
