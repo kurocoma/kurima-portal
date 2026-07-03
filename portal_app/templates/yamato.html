@@ -87,7 +87,7 @@
 
 <section class="panel mt-14">
   <h2 class="panel-title">B2へ取込んで印刷する</h2>
-  <p class="panel-lead">実際のChromeを開いてヤマトB2へ取込み、そのまま印刷まで行います。印刷が終わるまでブラウザは開いたままにします。</p>
+  <p class="panel-lead">実際のChromeを開いてヤマトB2へ<strong>自動で取込み</strong>、そのまま印刷まで行います。印刷が終わるまでブラウザは開いたままにします。（初回のみB2ログインが必要です）</p>
 
   {% if b2_browser and b2_browser.open %}
     <div class="result-bar">
@@ -98,13 +98,9 @@
       <span class="result-sub">{{ b2_browser.started_at[11:16] }} 起動 ・ 印刷が終わったら閉じてOK</span>
     </div>
     <div class="note mt-14">
-      <div class="note-title">開いているChromeで操作してください</div>
-      <ol class="note-list">
-        <li>B2クラウド → 外部データ取込 を開く（初回はログイン）</li>
-        <li>取込パターンを選ぶ</li>
-        <li>下記CSVを選択して取込む</li>
-        <li>取込後、送り状を<strong>印刷</strong>する</li>
-      </ol>
+      <div class="note-title">開いているChromeで印刷してください</div>
+      <p>自動取込が成功していれば、取込結果が表示されています。そのまま送り状を<strong>印刷</strong>してください。</p>
+      <p class="adv-note">うまく取込めていない場合は、手動で「B2クラウド→外部データ取込→取込パターン→下記CSVを選択→取込み開始」を行ってください。</p>
       {% if b2_csv_path %}<p class="mono">取込CSV: {{ b2_csv_path }}</p>{% endif %}
     </div>
     <form method="post" action="/yamato/b2-close" class="mt-14">
@@ -116,16 +112,16 @@
   {% else %}
     <div class="flow">
       <span class="flow-chip"><span class="flow-num">1</span>実Chromeを開く</span>
-      <span class="flow-chip"><span class="flow-num">2</span>CSVを取込む</span>
+      <span class="flow-chip"><span class="flow-num">2</span>B2へ自動で取込む</span>
       <span class="flow-chip"><span class="flow-num">3</span>印刷する</span>
     </div>
     <form method="post" action="/yamato/b2-open" data-progress-form data-progress-endpoint="/yamato/b2-open/start">
       <div class="cta-wrap">
         <button class="btn-cta" type="submit"{% if not b2_csv_path %} disabled{% endif %}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M3 9h18"/></svg>
-          B2取込ブラウザを開く
+          B2へ取込む
         </button>
-        <span class="run-note">実Chromeが開きます・印刷まで開いたまま</span>
+        <span class="run-note">実Chromeが開き、取込まで自動で行います・印刷まで開いたまま</span>
       </div>
       {% if b2_csv_path %}
         <p class="adv-note">取込むCSV: <span class="mono">{{ b2_csv_path }}</span></p>
@@ -136,10 +132,10 @@
         </div>
       {% endif %}
       <label class="opt plain">
-        <input type="checkbox" name="automate">
+        <input type="checkbox" name="automate" checked>
         <span>
-          <strong class="opt-title">取込も自動で試す（実験）</strong>
-          <span class="opt-desc">開いたChromeへ接続し取込まで自動を試みます。B2が弾いた場合はそのまま手動で続けられます。</span>
+          <strong class="opt-title">取込まで自動で行う</strong>
+          <span class="opt-desc">開いたChromeへ接続し、取込み開始まで自動実行します（初回のみB2ログインが必要）。外すと、開くだけで取込は手動になります。うまくいかない時も開いたChromeで手動で続けられます。</span>
         </span>
       </label>
     </form>

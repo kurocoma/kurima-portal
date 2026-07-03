@@ -1893,7 +1893,7 @@ async def yamato_b2_open_start(request: Request):
 
     steps: list[tuple[str, str]] = [("open", "B2ブラウザを開く")]
     if automate:
-        steps.append(("b2_import", "B2へ取込（自動を試行）"))
+        steps.append(("b2_import", "B2へ自動で取込"))
 
     def worker(job_id: str) -> None:
         progress_jobs.update_step(job_id, "open", status="running")
