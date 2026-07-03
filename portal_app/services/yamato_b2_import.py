@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
@@ -37,9 +37,81 @@ OPEN_B2_BROWSER_HANDLES: list[dict[str, object]] = []
 
 LOGIN_ID_ENV = "YAMATO_B2_LOGIN_ID"
 PASSWORD_ENV = "YAMATO_B2_PASSWORD"
+# お客様コードの分類コード(code2)・個人ID(kojin)は契約によって必要。既定は未設定=入力しない。
+CLASS_CODE_ENV = "YAMATO_B2_CLASS_CODE"
+PERSONAL_ID_ENV = "YAMATO_B2_PERSONAL_ID"
 URL_ENV = "YAMATO_B2_URL"
 STORAGE_STATE_ENV = "YAMATO_B2_STORAGE_STATE"
 HEADLESS_ENV = "YAMATO_B2_HEADLESS"
+
+# --- メンバーズ ログインフォームの実セレクタ（実機DOMダンプで確定） -----------------
+# 証拠: logs/next_engine_yamato/b2_import_debug/20260628_220820_check_login.html
+#   お客様コード(12桁) : <input type="text" name="username"      id="code1"  maxlength="12">
+#   分類コード(3桁・任意): <input type="text" name="CSTMR_CLS_CD"  id="code2"  maxlength="3">
+#   個人ID(任意)        : <input type="text" name="KOJIN"         id="kojin"  maxlength="20">
+#   パスワード          : <input type="password" name="CSTMR_PSWD" id="password">
+#   ログイン実行ボタン   : <a class="login" onclick="func_request_Link('LOGIN')">
+# 注意: name="username" は「表示用(code1)」と「hidden」の2つが存在するため、可視要素優先で入力する。
+B2_LOGIN_ID_SELECTORS = (
+    "input#code1",
+    "input[name='username']:not([type='hidden'])",
+    "input[name='username']",
+    "input[type='text']",
+)
+B2_LOGIN_CLASS_CODE_SELECTORS = (
+    "input#code2",
+    "input[name='CSTMR_CLS_CD']",
+)
+B2_LOGIN_PERSONAL_ID_SELECTORS = (
+    "input#kojin",
+    "input[name='KOJIN']",
+)
+B2_LOGIN_PASSWORD_SELECTORS = (
+    "input#password",
+    "input[name='CSTMR_PSWD']",
+    "input[name='password']",
+    "input[type='password']",
+)
+B2_LOGIN_SUBMIT_SELECTORS = (
+    "a.login[onclick*='func_request_Link']",
+    "a.login:has-text('ログイン')",
+    "input[type='submit'][value='ログイン']",
+    "input[type='button'][value='ログイン']",
+    "button[type='submit']:has-text('ログイン')",
+)
+
+# ログイン結果の分類（robustness: 明確なシグナルで区別する）
+B2_LOGIN_STATES = ("logged_in", "still_on_login", "needs_2fa", "system_error", "time_outside")
+_B2_TIME_OUTSIDE_MARKERS = (
+    "ご利用時間外",
+    "サービス時間外",
+    "時間外です",
+    "ご利用いただけない時間",
+    "ただ今の時間はご利用",
+)
+_B2_2FA_MARKERS = (
+    "認証コード",
+    "ワンタイムパスワード",
+    "二段階認証",
+    "SMS認証",
+    "本人認証",
+)
+_B2_TIME_OUTSIDE_MESSAGE = (
+    "B2ログイン: ヤマトビジネスメンバーズのご利用可能時間(7:00〜25:00)外のため認証できません。"
+    "時間内(7:00〜翌1:00)に再実行してください。"
+)
+
+
+class B2LoginError(RuntimeError):
+    """ログインが認証済み状態に到達しなかったときに送出する。
+
+    ``state`` に原因（still_on_login / needs_2fa / system_error / time_outside）を持たせ、
+    呼び出し元が skipped_reason 等へ明確に反映できるようにする。
+    """
+
+    def __init__(self, state: str, message: str) -> None:
+        super().__init__(message)
+        self.state = state
 
 IMPORT_PAGE_LABELS = (
     "外部データから発行",
@@ -386,6 +458,9 @@ async def _run_browser_step(
                 import_executed = await _execute_import_clicks(page, warnings=warnings)
                 if not import_executed:
                     skipped_reason = "import_completion_not_confirmed"
+        except B2LoginError as exc:
+            skipped_reason = f"login_{exc.state}"
+            warnings.append(str(exc))
         except Exception as exc:
             skipped_reason = f"browser_error:{type(exc).__name__}"
             warnings.append(str(exc))
@@ -514,15 +589,23 @@ async def _login_to_b2(
         await page.wait_for_timeout(1000)
         await _follow_meta_refresh_if_present(page)
         await page.wait_for_timeout(1000)
+    await _dismiss_b2_interstitials(page, warnings=warnings)
     if _is_b2_system_error_url(page.url):
         warnings.append("B2の入口URLがシステムエラー画面だったため、ログイン入口へ切り替えました。")
         await page.goto(DEFAULT_YAMATO_B2_MEMBER_LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
         await page.wait_for_timeout(1000)
-    if await _page_contains_any(
-        page,
-        ("送り状発行システムB2クラウド", "ログアウト", "メインメニュー"),
-        timeout=3000,
+        await _dismiss_b2_interstitials(page, warnings=warnings)
+
+    # 冪等: 既にログイン済みならフォーム入力をスキップして戻る。
+    # 重要: メンバーズの「ログイン画面」自体に "送り状発行システムB2クラウド" の文字列が含まれるため、
+    #        その語を既ログイン判定に使うと未ログインでも真になり、資格情報を入力せず先へ進む誤検知が起きる
+    #        （＝自動ログインが動かない根本原因）。ここではログインフォームの不在＋認証済みマーカーで判定する。
+    if not await _is_b2_member_login_page(page) and (
+        await _has_members_authenticated_markers(page)
+        or await _is_b2_cloud_page(page)
+        or await _b2_session_active(page)
     ):
+        warnings.append("B2LOGIN_STATE=logged_in")
         await _click_text_if_visible(page, "送り状発行システムB2クラウド", optional=True)
         return
 
@@ -531,25 +614,40 @@ async def _login_to_b2(
     await page.wait_for_timeout(1000)
     user_filled = await _fill_first_visible(
         page,
-        ("input[name='username']", "input#username", "input[type='text']"),
+        B2_LOGIN_ID_SELECTORS,
         login_id,
         optional=True,
     )
     if not user_filled:
         await page.goto(DEFAULT_YAMATO_B2_MEMBER_LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
         await page.wait_for_timeout(1500)
+        await _dismiss_b2_interstitials(page, warnings=warnings)
         user_filled = await _fill_first_visible(
             page,
-            ("input[name='username']", "input#username", "input[type='text']"),
+            B2_LOGIN_ID_SELECTORS,
             login_id,
             optional=True,
-    )
+        )
     if not user_filled:
-        raise RuntimeError("B2ログインID入力欄を確認できませんでした。")
+        # ログインID欄が出ない = 時間外画面 or システムエラーの可能性。状態を分類して原因を明確化する。
+        state = await _classify_b2_login_result(page)
+        if state == "time_outside":
+            raise B2LoginError("time_outside", _B2_TIME_OUTSIDE_MESSAGE)
+        if state == "system_error":
+            raise B2LoginError("system_error", "B2ログイン: ログインフォーム到達前にシステムエラー画面へ遷移しました。")
+        raise B2LoginError("still_on_login", "B2ログインID入力欄を確認できませんでした。")
+
+    # 分類コード(code2)・個人ID(kojin)は契約により必要。env にある場合のみ入力（既定は未設定=入力しない）。
+    class_code = os.environ.get(CLASS_CODE_ENV, "").strip()
+    if class_code:
+        await _fill_first_visible(page, B2_LOGIN_CLASS_CODE_SELECTORS, class_code, optional=True)
+    personal_id = os.environ.get(PERSONAL_ID_ENV, "").strip()
+    if personal_id:
+        await _fill_first_visible(page, B2_LOGIN_PERSONAL_ID_SELECTORS, personal_id, optional=True)
 
     await _fill_first_visible(
         page,
-        ("input[name='CSTMR_PSWD']", "input[name='password']", "input[type='password']"),
+        B2_LOGIN_PASSWORD_SELECTORS,
         password,
     )
     await _click_b2_login_submit(page)
@@ -569,15 +667,172 @@ async def _login_to_b2(
     except PlaywrightTimeoutError:
         warnings.append("B2ログイン後の画面ロード完了待ちがタイムアウトしました。")
     await page.wait_for_timeout(2500)
+    await _dismiss_b2_interstitials(page, warnings=warnings)
+
+    # ログイン結果を分類し、明確なシグナル(B2LOGIN_STATE=...)を warnings に残す。
+    state = await _classify_b2_login_result(page)
+    warnings.append(f"B2LOGIN_STATE={state}")
+    if state == "logged_in":
+        await _click_text_if_visible(page, "送り状発行システムB2クラウド", optional=True)
+        return
+    if state == "time_outside":
+        raise B2LoginError("time_outside", _B2_TIME_OUTSIDE_MESSAGE)
+    if state == "needs_2fa":
+        raise B2LoginError(
+            "needs_2fa",
+            "B2ログイン: 追加認証(認証コード/ワンタイムパスワード等)が要求されました。"
+            "自動化では突破できないため手動対応が必要です。",
+        )
+    if state == "system_error":
+        raise B2LoginError(
+            "system_error",
+            "B2ログイン: 送信後にシステムエラー画面へ遷移しました。時間をおいて再実行してください。",
+        )
+    raise B2LoginError(
+        "still_on_login",
+        "B2ログイン後もログイン画面に留まっています。資格情報またはログインフォームのセレクタを確認してください。",
+    )
+
+
+async def _dismiss_b2_interstitials(page, *, warnings: list[str] | None = None) -> None:
+    """cookie同意バナー / お知らせ・ニュースのモーダルを best-effort で閉じる（無ければ no-op）。
+
+    ログインフォームやメンバーズ画面に被さって操作を阻害する割り込み要素を除去する。
+    見つからない/閉じられない場合も例外は投げない（ログイン本体を止めないため）。
+    """
+    selectors = (
+        # cookie 同意（一般的な実装パターン）
+        "#onetrust-accept-btn-handler",
+        "button#truste-consent-button",
+        "a#truste-consent-button",
+        "button:has-text('同意して閉じる')",
+        "button:has-text('同意する')",
+        "a:has-text('同意する')",
+        "button:has-text('すべて許可')",
+        # お知らせ / ニュースのモーダル閉じる
+        ".modal-close",
+        "#modal-close",
+        ".news-close",
+        ".btn-close",
+        "a[title='閉じる']",
+        "button[title='閉じる']",
+        "button[aria-label='閉じる']",
+        "button[aria-label='close']",
+    )
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            if await locator.count() == 0:
+                continue
+            if await locator.is_visible(timeout=800):
+                await locator.click(timeout=2000)
+                await page.wait_for_timeout(300)
+                if warnings is not None:
+                    warnings.append(f"B2割り込み要素を閉じました: {selector}")
+        except Exception:
+            continue
+
+
+async def _has_members_authenticated_markers(page) -> bool:
+    """メンバーズ/B2クラウドで「認証済み」を示すDOMマーカーの有無を返す。
+
+    証拠: ログイン済みポータルには #ybmHeaderUserName(氏名) / #ybmSideMenuServicesLink が存在する
+    （logs/next_engine_yamato/b2_import_debug/20260626_095726_check_login.html）。
+    ログイン画面には存在しない。
+    """
+    try:
+        return bool(
+            await page.evaluate(
+                """() => {
+                  const nameEl = document.querySelector('#ybmHeaderUserName');
+                  const hasName = !!(nameEl && (nameEl.textContent || '').trim());
+                  const servicesLink = document.querySelector('#ybmSideMenuServicesLink');
+                  const logout = Array.from(document.querySelectorAll('a,button')).some(
+                    (el) => (el.textContent || '').includes('ログアウト')
+                  );
+                  return hasName || !!servicesLink || logout;
+                }"""
+            )
+        )
+    except Exception:
+        return False
+
+
+async def _b2_session_active(page) -> bool:
+    """メンバーズの認証済みセッション cookie(bmypagesession)が有効かを返す。
+
+    criteria の「認証済み」定義（有効な bmypagesession）に対応。時間外ログインの縮退画面
+    (HMPMNU0006) では bmypagesession が付与されない（実測: JSESSIONID/SECURE_BIGip のみ）ため、
+    これで「見かけ上フォームは消えたが未認証」の縮退状態を弾く。
+    """
+    try:
+        cookies = await page.context.cookies()
+    except Exception:
+        return False
+    for cookie in cookies:
+        if cookie.get("name") == "bmypagesession" and (cookie.get("value") or "").strip():
+            return True
+    return False
+
+
+async def _page_body_text(page) -> str:
+    try:
+        return await page.locator("body").inner_text(timeout=3000)
+    except Exception:
+        return ""
+
+
+def _is_b2_service_hours_now(now: datetime | None = None) -> bool:
+    """ヤマトビジネスメンバーズのログイン可能時間(7:00〜翌1:00)内なら True。
+
+    利用不可なのは 1:00〜6:59 の時間帯。B2クラウドのみ4:00〜だが、
+    ここが対象にする「メンバーズへのログイン」は7:00〜25:00。
+    """
+    current = now or datetime.now()
+    return not (1 <= current.hour < 7)
+
+
+def _text_has_time_outside(text: str) -> bool:
+    return any(marker in text for marker in _B2_TIME_OUTSIDE_MARKERS)
+
+
+def _text_has_2fa(text: str) -> bool:
+    return any(marker in text for marker in _B2_2FA_MARKERS)
+
+
+async def _classify_b2_login_result(page) -> str:
+    """現在のページから、ログイン結果を次のいずれかに分類する:
+
+    logged_in / still_on_login / needs_2fa / system_error / time_outside
+    """
+    url = page.url or ""
+    if _is_b2_system_error_url(url):
+        return "system_error"
+
+    text = await _page_body_text(page)
+    if _text_has_time_outside(text):
+        return "time_outside"
+    if _text_has_2fa(text):
+        return "needs_2fa"
+
     if await _is_b2_member_login_page(page):
-        raise RuntimeError("B2ログイン後もログイン画面に留まっています。")
-    if not await _page_contains_any(
-        page,
-        ("送り状発行システムB2クラウド", "ログアウト", "メインメニュー"),
-        timeout=5000,
-    ):
-        warnings.append("B2ログイン後の代表テキストを確認できませんでした。画面キャプチャを確認してください。")
-    await _click_text_if_visible(page, "送り状発行システムB2クラウド", optional=True)
+        # フォームがまだ出ている = 未認証。時間外なら原因を time_outside として区別する。
+        if not _is_b2_service_hours_now():
+            return "time_outside"
+        return "still_on_login"
+
+    if await _is_b2_cloud_page(page):
+        return "logged_in"
+    # 認証済みの確証は「有効な bmypagesession」または明確な認証済みマーカー(ログアウト/ユーザー名)に限る。
+    # 「メインメニュー」という文字列だけでは判定しない（HMPMNU0006 の縮退画面が該当し誤検知するため）。
+    if await _b2_session_active(page) or await _has_members_authenticated_markers(page):
+        return "logged_in"
+
+    # ここに来る = ログインフォームは消えたが、有効セッションも認証マーカーも無い縮退状態。
+    # 代表例: HMPMNU0006（メンバーズ利用時間外にログインしたときの縮退画面。bmypagesession が付与されない）。
+    if "HMPMNU0006" in url or not _is_b2_service_hours_now():
+        return "time_outside"
+    return "still_on_login"
 
 
 async def _is_b2_member_login_page(page) -> bool:
@@ -604,7 +859,16 @@ async def _follow_meta_refresh_if_present(page) -> None:
     refresh_url = html.unescape(match.group(1).strip())
     if not refresh_url:
         return
-    await page.goto(refresh_url, wait_until="domcontentloaded", timeout=60000)
+    # meta refresh の url は相対パス(例: /bmypage/servlet/...HMPLGI0010JspServlet)のことがある。
+    # page.goto は絶対URLを要求するため、現在のURL基準で解決する（未解決だと "Cannot navigate
+    # to invalid URL" で落ち、ログインが flaky に失敗する）。
+    resolved = urljoin(page.url or "", refresh_url)
+    if not urlsplit(resolved).scheme:
+        return
+    try:
+        await page.goto(resolved, wait_until="domcontentloaded", timeout=60000)
+    except Exception:
+        return
 
 
 async def _click_b2_error_login_link(page, *, warnings: list[str]) -> bool:
@@ -1641,6 +1905,9 @@ async def run_b2_import_over_cdp(
                     import_executed = await _execute_import_clicks(page, warnings=warnings)
                     if not import_executed:
                         skipped_reason = "import_completion_not_confirmed"
+        except B2LoginError as exc:
+            skipped_reason = f"login_{exc.state}"
+            warnings.append(str(exc))
         except Exception as exc:
             skipped_reason = f"browser_error:{type(exc).__name__}"
             warnings.append(str(exc))
