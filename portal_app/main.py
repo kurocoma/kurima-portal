@@ -1431,7 +1431,7 @@ async def clickpost_prepare(request: Request):
             slow_mo_ms=slow_mo_ms,
             preview_limit=30,
             download_invoices=True,
-            restore_invoices_after_download=True,
+            restore_invoices_after_download=False,
         )
         return templates.TemplateResponse(
             "clickpost.html",
@@ -1443,7 +1443,7 @@ async def clickpost_prepare(request: Request):
                 "letterpack_pdf_result": None,
                 "browser_mode": browser_mode,
                 "slow_mo_ms": slow_mo_ms if headed else 150,
-                "message": "Next Engine から購入者データ、受注明細データ、納品書PDFを取得し、clickpostimport.csv と letterpack_addressbook.csv を作成しました。",
+                "message": "Next Engine から購入者データ、受注明細データ、納品書PDFを取得し、clickpostimport.csv と letterpack_addressbook.csv を作成しました。対象伝票は「納品書印刷済」へ移動しています（ヤマトページの『納品書印刷待ちへ復旧』で戻せます）。",
                 "error": None,
             },
         )
@@ -1492,12 +1492,12 @@ async def clickpost_prepare_start(request: Request):
             slow_mo_ms=slow_mo_ms,
             preview_limit=30,
             download_invoices=True,
-            restore_invoices_after_download=True,
+            restore_invoices_after_download=False,
             progress_callback=update_progress,
         )
         progress_jobs.finish(
             job_id,
-            message="NE取得、納品書PDF取得、CSV作成が完了しました。",
+            message="NE取得、納品書PDF取得、CSV作成が完了しました。対象伝票は「納品書印刷済」へ移動しています。",
             result={"prepare": _clickpost_prepare_summary(prepare_result)},
         )
 
@@ -2446,6 +2446,8 @@ async def yamato_run_full_start(request: Request):
     # 実ChromeでのB2取込（b2-open の automate 相当）を 1 ジョブで続けて実行する。
     form = await _read_form(request)
     headed = _form_headed(form)
+    verify_invoice_statuses = _form_bool(form, "verify_invoice_statuses")
+    test_restore_print_wait = _form_bool(form, "test_restore_print_wait")
     slow_mo_ms = _form_int(form, "slow_mo_ms", 150)
     preview_limit = _form_int(form, "preview_limit", 30)
 
@@ -2454,9 +2456,15 @@ async def yamato_run_full_start(request: Request):
         ("invoice", "納品書PDF取得"),
         ("custom", "配送情報CSV取得"),
         ("conversion", "住所補正・B2取込CSV作成"),
-        ("b2_open", "B2ブラウザを開く"),
-        ("b2_import", "B2へ自動で取込"),
     ]
+    if test_restore_print_wait:
+        steps.append(("restore", "印刷待ちへ復旧（テストモード）"))
+    steps.extend(
+        [
+            ("b2_open", "B2ブラウザを開く"),
+            ("b2_import", "B2へ自動で取込"),
+        ]
+    )
 
     def worker(job_id: str) -> None:
         def _prep_progress(key: str, status: str, detail: str | None = None) -> None:
@@ -2469,7 +2477,7 @@ async def yamato_run_full_start(request: Request):
             execute_downloads=True,
             check_invoices=True,
             execute_invoices=True,
-            verify_invoice_statuses=False,
+            verify_invoice_statuses=verify_invoice_statuses,
             check_custom_shipping=True,
             execute_custom_shipping=True,
             custom_shipping_order_numbers=tuple(),
@@ -2481,7 +2489,58 @@ async def yamato_run_full_start(request: Request):
             progress=_prep_progress,
         )
         conversion = prepare_result.conversion
-        printed_notice = _yamato_printed_orders_notice(prepare_result, None)
+
+        # テストモード: 納品書PDF取得で「印刷済み」へ進んだ伝票を、B2取込の前に
+        # 「納品書印刷待ちへ復旧」でまとめて戻す（run-selected と同じ扱い）。
+        restore_result = None
+        if test_restore_print_wait:
+            invoice = prepare_result.invoice
+            restore_orders = _yamato_restore_order_numbers_from_prepare_result(prepare_result)
+            if invoice is None or not invoice.executed or not restore_orders:
+                progress_jobs.update_step(job_id, "restore", status="completed", detail="対象なし")
+            else:
+                progress_jobs.update_step(job_id, "restore", status="running")
+                try:
+                    restore_result = restore_next_engine_print_wait_batch_sync(
+                        restore_orders,
+                        execute=True,
+                        headless=not headed,
+                        slow_mo_ms=slow_mo_ms,
+                    )
+                except Exception as exc:
+                    progress_jobs.update_step(job_id, "restore", status="failed")
+                    progress_jobs.fail(
+                        job_id,
+                        "印刷待ちへの復旧でエラーが発生しました。"
+                        "『その他の操作・納品書印刷待ちへ復旧』で次の伝票を手動復旧してください: "
+                        f"{', '.join(restore_orders)} / エラー: {exc}",
+                    )
+                    return
+                failed_orders = list(restore_result.failed_order_numbers)
+                if failed_orders:
+                    progress_jobs.update_step(
+                        job_id, "restore", status="failed", detail=f"復旧失敗 {len(failed_orders)}件"
+                    )
+                    progress_jobs.fail(
+                        job_id,
+                        "一部の伝票を印刷待ちへ復旧できませんでした。"
+                        "『その他の操作・納品書印刷待ちへ復旧』で手動復旧してください: "
+                        f"{', '.join(failed_orders)}",
+                    )
+                    return
+                progress_jobs.update_step(
+                    job_id,
+                    "restore",
+                    status="completed",
+                    detail=f"{len(restore_orders)}件を印刷待ちへ戻しました",
+                )
+
+        printed_notice = _yamato_printed_orders_notice(prepare_result, restore_result)
+        restore_note = (
+            f" テストモード: {len(restore_result.order_numbers)}件を印刷待ちへ復旧しました。"
+            if restore_result is not None
+            else ""
+        )
 
         # 新しく作成されたCSVのみをB2へ渡す（古いCSVへのフォールバックは事故のもとなので行わない）。
         output_csv = getattr(conversion, "output_csv", None)
@@ -2513,7 +2572,7 @@ async def yamato_run_full_start(request: Request):
                 job_id,
                 message=(
                     "CSV作成は完了しましたが、自動化に接続できませんでした。"
-                    "開いているB2ブラウザで手動で取込・印刷してください。"
+                    "開いているB2ブラウザで手動で取込・印刷してください。" + restore_note
                 ),
                 result={"mode": "auto_failed", "reason": "cdp_not_ready"},
             )
@@ -2532,7 +2591,7 @@ async def yamato_run_full_start(request: Request):
                 job_id,
                 message=(
                     "CSV作成は完了しましたが、自動取込は失敗しました。"
-                    "開いているB2ブラウザで手動で取込・印刷してください。"
+                    "開いているB2ブラウザで手動で取込・印刷してください。" + restore_note
                 ),
                 result={"mode": "auto_failed", "error": str(exc)},
             )
@@ -2542,11 +2601,16 @@ async def yamato_run_full_start(request: Request):
             progress_jobs.update_step(job_id, "b2_import", status="completed")
             progress_jobs.finish(
                 job_id,
-                message="CSV作成からB2取込まで自動で完了しました。開いているブラウザで印刷してください。",
+                message="CSV作成からB2取込まで自動で完了しました。開いているブラウザで印刷してください。" + restore_note,
                 result={
                     "mode": "auto",
                     "output_csv": _path_text(output_csv),
                     "output_rows": getattr(conversion, "output_rows", None),
+                    **(
+                        {"print_wait_restored": len(restore_result.order_numbers)}
+                        if restore_result is not None
+                        else {}
+                    ),
                     **_b2_outcome_summary(outcome),
                 },
             )
@@ -2557,7 +2621,7 @@ async def yamato_run_full_start(request: Request):
                 job_id,
                 message=(
                     f"CSV作成は完了しましたが、自動取込は完了しませんでした（{reason or '理由不明'}）。"
-                    "開いているB2ブラウザで手動で取込・印刷してください。"
+                    "開いているB2ブラウザで手動で取込・印刷してください。" + restore_note
                 ),
                 result={"mode": "auto_incomplete", **_b2_outcome_summary(outcome)},
             )
@@ -2567,7 +2631,12 @@ async def yamato_run_full_start(request: Request):
         steps=steps,
         worker=worker,
         workflow="yamato_run_full",
-        metadata={"headed": headed, "slow_mo_ms": slow_mo_ms},
+        metadata={
+            "headed": headed,
+            "slow_mo_ms": slow_mo_ms,
+            "test_restore_print_wait": test_restore_print_wait,
+            "verify_invoice_statuses": verify_invoice_statuses,
+        },
     )
     return {"job_id": job_id}
 

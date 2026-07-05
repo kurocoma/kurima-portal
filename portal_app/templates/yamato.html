@@ -26,7 +26,7 @@
     <span class="flow-chip" data-chip="6"><span class="flow-num">6</span>B2へ取込</span>
   </div>
 
-  <form method="post" action="/yamato/run-full" data-progress-form data-progress-endpoint="/yamato/run-full/start">
+  <form method="post" action="/yamato/run-full" data-progress-form data-progress-endpoint="/yamato/run-full/start" data-settings-from="yamato-csv-form">
     <input type="hidden" name="slow_mo_ms" value="150">
     <input type="hidden" name="preview_limit" value="30">
     <div class="cta-wrap">
@@ -36,6 +36,7 @@
       </button>
       <span class="run-note">所要 約4〜6分・実Chromeが開き、完了後は印刷のみ</span>
     </div>
+    <p class="adv-note">テストモード・ブラウザ画面表示・納品書ステータス詳細確認は、下の「ヤマト用CSVを作成する」の詳細設定がそのまま適用されます。</p>
   </form>
 </section>
 
@@ -50,7 +51,7 @@
     <span class="flow-chip" data-chip="5"><span class="flow-num">5</span>B2取込CSV作成</span>
   </div>
 
-  <form method="post" action="/yamato/run-selected" data-progress-form data-progress-endpoint="/yamato/run-selected/start">
+  <form id="yamato-csv-form" method="post" action="/yamato/run-selected" data-progress-form data-progress-endpoint="/yamato/run-selected/start">
     <input type="hidden" name="import_mode" value="execute">
     <input type="hidden" name="slow_mo_ms" value="150">
     <input type="hidden" name="preview_limit" value="30">
@@ -348,6 +349,18 @@
       // さらに fetch に FormData を渡すと multipart になりサーバーの parse_qs が読めないので、
       // URLSearchParams で urlencoded 送信する。
       const body = new URLSearchParams(new FormData(form, event.submitter));
+      // data-settings-from を持つフォーム（一括実行）は、参照先フォームの
+      // 詳細設定（テストモード・ブラウザ表示・納品書ステータス詳細確認）を共有する。
+      const settingsFormId = form.dataset.settingsFrom;
+      if (settingsFormId) {
+        const settingsForm = document.getElementById(settingsFormId);
+        if (settingsForm) {
+          const shared = new FormData(settingsForm);
+          for (const key of ["test_restore_print_wait", "verify_invoice_statuses", "headed"]) {
+            if (shared.has(key) && !body.has(key)) body.append(key, shared.get(key));
+          }
+        }
+      }
       for (const button of document.querySelectorAll("[data-progress-form] button")) button.disabled = true;
       clearFlowChips();
       render({ title: "ヤマト用CSV作成", status: "queued", message: "ジョブを開始しています。", steps: [] });
