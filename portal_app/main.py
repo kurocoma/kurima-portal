@@ -12,6 +12,13 @@ from portal_app.env import load_env_file
 
 load_env_file()
 
+from portal_app.log_paths import get_portal_logger, setup_file_logging
+
+# 実行ログ・エラーログの出力先（既定: SharePoint 同期フォルダの
+# 神里\くりまポータルエラーログ。KURIMA_LOG_DIR で上書き可、無ければ logs/ に fallback）。
+RUNTIME_LOG_DIR = setup_file_logging()
+portal_logger = get_portal_logger()
+
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -87,6 +94,22 @@ app = FastAPI(title="くりまポータルツール")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=APP_DIR / "templates")
 INVENTORY_TABS = {"normal", "takaesu"}
+
+# アプリ読込（＝サーバー起動）を実行ログへ記録する。
+portal_logger.info("ポータル起動: app=くりまポータルツール log_dir=%s", RUNTIME_LOG_DIR)
+
+
+@app.exception_handler(Exception)
+async def _log_unhandled_exception(request: Request, exc: Exception) -> PlainTextResponse:
+    """未処理例外を traceback 付きでエラーログ（portal-error.log）へ記録する。"""
+    portal_logger.error(
+        "未処理の例外: %s %s -> %s",
+        request.method,
+        request.url.path,
+        exc,
+        exc_info=exc,
+    )
+    return PlainTextResponse("Internal Server Error", status_code=500)
 
 
 def _parse_order_numbers(raw: str | None) -> tuple[str, ...]:

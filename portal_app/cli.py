@@ -15,6 +15,8 @@ except Exception:
 
 load_env_file()
 
+from portal_app.log_paths import get_portal_logger
+
 from portal_app.services.clickpost import (
     ClickPostBuyerDownloadResult,
     ClickPostConversionResult,
@@ -2512,6 +2514,19 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # CLI 実行の開始・終了・失敗を共有ログ（実行ログ／エラーログ）へ記録する。
+    logger = get_portal_logger()
+    logger.info("CLI開始: command=%s", args.command)
+    try:
+        exit_code = _dispatch(args)
+    except Exception as exc:
+        logger.error("CLI失敗: command=%s error=%s", args.command, exc, exc_info=exc)
+        raise
+    logger.info("CLI終了: command=%s exit=%s", args.command, exit_code)
+    return exit_code
+
+
+def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "check":
         return check()
     if args.command == "download-next-engine":

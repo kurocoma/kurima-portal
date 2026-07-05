@@ -31,6 +31,14 @@ powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 ## セットアップ（新しいPC）
 
+**かんたんな方法（推奨）**: リポジトリ直下の `setup.bat` を実行（ダブルクリック）します。
+uv の導入（未導入なら winget → 公式スクリプトの順で自動導入）→ `uv sync` →
+Playwright ブラウザ導入 → `.env` 作成 → 環境診断（`scripts/doctor.py`）まで自動で行います。
+リポジトリ未取得の PC では `setup.bat` 1 ファイルだけコピーして実行すれば、
+`%USERPROFILE%\kurima-portal` への `git clone` から自動で行います（Git for Windows が必要）。
+
+手動で行う場合:
+
 ```powershell
 git clone https://github.com/kurocoma/kurima-portal.git
 cd kurima-portal
@@ -51,6 +59,12 @@ uv run python scripts/doctor.py
 
 `doctor.py` は Python バージョン / uv / Playwright ブラウザ実体 / ポータル同期フォルダの解決 /
 認証系環境変数の設定状況を検査し、不足があればインストールコマンドを表示します（終了コード = 失敗数）。
+
+## 更新（導入済みのPC）
+
+リポジトリ直下の `update.bat` を実行（ダブルクリック）します。
+`git pull` → `uv sync` → Playwright ブラウザ確認まで自動で行います。
+サーバー起動中に更新した場合は `scripts\restart.bat` で再起動すると反映されます。
 
 ## 起動
 
@@ -92,6 +106,7 @@ New-NetFirewallRule -DisplayName "kurima-portal" -Direction Inbound -Action Allo
 |---|---|
 | `KURIMA_PORTAL_ROOT` | ポータル同期フォルダ。未設定なら既定候補を自動探索（`PORTAL_ROOT` も後方互換で有効） |
 | `KURIMA_MASTER_BOOK` / `KURIMA_ORDER_CSV_DIR` / `KURIMA_TOOL_DIR` | 商品管理シート / 受注明細フォルダ / ツールフォルダの個別上書き（通常は不要） |
+| `KURIMA_LOG_DIR` | 実行ログ・エラーログの出力先を上書き。未設定なら SharePoint 同期フォルダの `神里\くりまポータルエラーログ`（同期フォルダが無いPCは `logs/` に fallback） |
 | `KURIMA_PORT` | serve.ps1 の既定ポート（既定 8006） |
 | `NEXT_ENGINE_LOGIN_ID` / `NEXT_ENGINE_PASSWORD` | Next Engine ログイン（または `NEXT_ENGINE_CREDENTIAL_PATH` で認証Excel指定） |
 | `YAMATO_B2_LOGIN_ID` / `YAMATO_B2_PASSWORD` | ヤマトB2ログイン |
@@ -112,6 +127,27 @@ New-NetFirewallRule -DisplayName "kurima-portal" -Direction Inbound -Action Allo
 | `/jobs` | 実行履歴。日時・種別・結果・所要時間・エラー概要を新しい順に表示 |
 | `/logs` | ログ一覧。`logs/` 配下のファイルを新しい順に一覧し、テキストログを画面で閲覧 |
 | `/health` | 死活監視用（`{"status": "ok"}`） |
+
+## ログ出力（実行ログ・エラーログ）
+
+アプリの実行ログとエラーログは SharePoint 同期フォルダへ出力され、
+同期がつながっているすべての PC から同じ場所で参照できます。
+
+| ファイル | 内容 |
+|---|---|
+| `portal-run.log` | 実行ログ（サーバー起動、ジョブ・CLI の開始/終了、工程の進行） |
+| `portal-error.log` | エラーログ（例外・traceback、ジョブ失敗の詳細のみ） |
+
+出力先フォルダは次の順で解決されます（実装: `portal_app/log_paths.py`）:
+
+1. 環境変数 `KURIMA_LOG_DIR`（明示上書き用）
+2. SharePoint 同期ライブラリ配下の `神里\くりまポータルエラーログ`
+   （既定: `%USERPROFILE%\株式会社しまのや\くりまポータル - ドキュメント\神里\くりまポータルエラーログ`。フォルダが無ければ自動作成）
+3. リポジトリ内 `logs/`（同期フォルダが無い PC でも起動できるようにする fallback）
+
+ユーザー名は `%USERPROFILE%` から解決されるため、PC ごとの設定は不要です。
+従来どおり、ジョブごとの詳細ログ（`events.jsonl` / `summary.json`）はリポジトリ内 `logs/` にも
+出力され、`/logs`・`/jobs` 画面から閲覧できます（既存機能はそのまま）。
 
 ## トラブルシュート
 

@@ -4,6 +4,7 @@ import argparse
 import csv
 import hashlib
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -41,7 +42,8 @@ def sha256_files(paths: list[Path]) -> str:
 
 
 def resolve_path(value: object) -> Path:
-    path = Path(str(value))
+    # `~` と `%USERPROFILE%` 等の環境変数を展開する（PC 依存のユーザー名を config に直書きしないため）。
+    path = Path(os.path.expandvars(str(value))).expanduser()
     return path if path.is_absolute() else ROOT / path
 
 

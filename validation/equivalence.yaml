@@ -1,7 +1,8 @@
 version: 1
 name: yamato_b2_csv_equivalence
-source_csv: "C:\\Users\\hppym\\株式会社しまのや\\くりまポータル - ドキュメント\\ネクストエンジン\\ne-yamatocsv\\ne-yamato2606251604.csv"
-reference_csv: "C:\\Users\\hppym\\株式会社しまのや\\くりまポータル - ドキュメント\\ネクストエンジン\\完成データ\\ne-to-yamato2606260043.csv"
+# パスは ~（ユーザープロファイル）と環境変数（%USERPROFILE% 等）を展開して解決される。
+source_csv: "~\\株式会社しまのや\\くりまポータル - ドキュメント\\ネクストエンジン\\ne-yamatocsv\\ne-yamato2606251604.csv"
+reference_csv: "~\\株式会社しまのや\\くりまポータル - ドキュメント\\ネクストエンジン\\完成データ\\ne-to-yamato2606260043.csv"
 run_root: validation/runs
 generated_name: generated-ne-to-yamato.csv
 must_match:

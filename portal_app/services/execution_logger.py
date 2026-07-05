@@ -88,6 +88,7 @@ class ExecutionLogger:
         }
         with self.events_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        _mirror_to_portal_log(payload)
 
     def write_summary(self, summary: dict[str, Any]) -> None:
         payload = {
@@ -115,3 +116,39 @@ class ExecutionLogger:
 def _safe_segment(value: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip())
     return safe.strip("._") or "run"
+
+
+def _mirror_to_portal_log(payload: dict[str, Any]) -> None:
+    """ジョブの実行イベントを共有ログ（SharePoint 同期フォルダ）へもミラーする。
+
+    - 全イベント → portal-run.log（実行ログ）
+    - level=error のイベント → portal-error.log にも出る（traceback 込みのエラーログ）
+
+    ミラーはベストエフォート。ここでの失敗（同期フォルダのロック等）で
+    ジョブ本体や logs/ 配下の既存ログ書き込みを壊さないよう例外は握りつぶす。
+    """
+    try:
+        from portal_app.log_paths import get_portal_logger
+
+        logger = get_portal_logger()
+        parts = [
+            f"workflow={payload.get('workflow')}",
+            f"run_id={payload.get('run_id')}",
+            f"event={payload.get('event')}",
+        ]
+        if payload.get("status"):
+            parts.append(f"status={payload['status']}")
+        if payload.get("step"):
+            parts.append(f"step={payload['step']}")
+        if payload.get("detail"):
+            parts.append(f"detail={payload['detail']}")
+        message = " ".join(parts)
+        if payload.get("level") == "error":
+            data = payload.get("data") or {}
+            logger.error("%s data=%s", message, json.dumps(data, ensure_ascii=False))
+        elif payload.get("level") == "warn":
+            logger.warning(message)
+        else:
+            logger.info(message)
+    except Exception:
+        pass

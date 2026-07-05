@@ -1,5 +1,9 @@
 * text=auto eol=lf
 
+# Windows のバッチファイルは CRLF でないと cmd.exe が誤動作し得るため固定する
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
 *.png binary
 *.jpg binary
 *.jpeg binary
