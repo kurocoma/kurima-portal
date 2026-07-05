@@ -194,7 +194,20 @@ async def download_yamato_invoice_batch(
     )
     _append_invoice_batch_audit(result)
     if error:
-        raise RuntimeError("ヤマト対象の納品書一括ダウンロードに失敗しました。")
+        # ここで止まると対象伝票が「印刷済み」のまま残り得るため、どの伝票かを
+        # エラー文へ必ず明示する（利用者が手動復旧できるようにする）。
+        orders = ", ".join(before_list.order_numbers)
+        if downloaded_file is not None:
+            notice = (
+                f"※納品書PDFは取得済みのため「印刷済み」へ変更済みの伝票: {orders}"
+                "（『その他の操作・納品書印刷待ちへ復旧』で戻せます）"
+            )
+        else:
+            notice = (
+                f"※対象伝票: {orders}。ダウンロード途中の失敗のため「印刷済み」へ"
+                "変更された可能性があります（『その他の操作・納品書印刷待ちへ復旧』で確認・復旧できます）"
+            )
+        raise RuntimeError(f"ヤマト対象の納品書一括ダウンロードに失敗しました。{notice}")
     return result
 
 

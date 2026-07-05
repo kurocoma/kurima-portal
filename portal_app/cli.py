@@ -148,6 +148,7 @@ def confirm_next_engine_shipment(
     fetch_yamato_tracking: bool,
     write_import_csv: bool,
     execute_upload: bool,
+    confirm_upload: bool,
     headed: bool,
     slow_mo_ms: int,
     preview_limit: int,
@@ -160,6 +161,7 @@ def confirm_next_engine_shipment(
         fetch_yamato_tracking=fetch_yamato_tracking,
         write_import_csv=write_import_csv,
         execute_upload=execute_upload,
+        confirm_upload=confirm_upload,
         headless=not headed,
         slow_mo_ms=slow_mo_ms,
         preview_limit=preview_limit,
@@ -173,16 +175,28 @@ def build_shipment_confirmation_csv(
     write: bool,
     order_numbers: tuple[str, ...],
     preview_limit: int,
+    buyer_lookback_days: int | None = None,
+    clickpost_lookback_days: int | None = None,
+    letterpack_lookback_days: int | None = None,
+    yamato_lookback_days: int | None = None,
 ) -> int:
     result = (
         create_shipment_slip_import_csv(
             order_numbers=order_numbers,
             preview_limit=preview_limit,
+            buyer_lookback_days=buyer_lookback_days,
+            clickpost_lookback_days=clickpost_lookback_days,
+            letterpack_lookback_days=letterpack_lookback_days,
+            yamato_lookback_days=yamato_lookback_days,
         )
         if write
         else preview_shipment_slip_import(
             order_numbers=order_numbers,
             preview_limit=preview_limit,
+            buyer_lookback_days=buyer_lookback_days,
+            clickpost_lookback_days=clickpost_lookback_days,
+            letterpack_lookback_days=letterpack_lookback_days,
+            yamato_lookback_days=yamato_lookback_days,
         )
     )
     _print_shipment_slip_import_result(result)
@@ -192,6 +206,7 @@ def build_shipment_confirmation_csv(
 def upload_next_engine_shipment_confirmation(
     *,
     execute: bool,
+    confirm_upload: bool,
     csv_file: str | None,
     headed: bool,
     slow_mo_ms: int,
@@ -199,6 +214,7 @@ def upload_next_engine_shipment_confirmation(
 ) -> int:
     result = upload_next_engine_shipment_csv_sync(
         execute=execute,
+        confirm_upload=confirm_upload,
         upload_csv=Path(csv_file) if csv_file else None,
         headless=not headed,
         slow_mo_ms=slow_mo_ms,
@@ -899,6 +915,11 @@ def _print_shipment_slip_import_result(result: ShipmentSlipImportResult) -> None
     else:
         print("output_csv=(dry_run)")
     print(f"source_files={len(result.source_files)}")
+    print(f"scanned_count={result.scanned_count}")
+    print(f"duplicate_count={result.duplicate_count}")
+    print(f"buyer_matched_count={result.buyer_matched_count}")
+    print(f"tracking_matched_count={result.tracking_matched_count}")
+    print(f"unresolved_count={result.unresolved_count}")
     if result.audit_path:
         print(f"audit_path={result.audit_path}")
     for warning in result.warnings:
@@ -918,6 +939,8 @@ def _print_shipment_upload_result(result: ShipmentUploadResult) -> None:
         print(f"confirmation_text={result.confirmation_text[:300]}")
     if result.skipped_reason:
         print(f"skipped_reason={result.skipped_reason}")
+    for error in result.errors:
+        print(f"error={error}")
     for warning in result.warnings:
         print(f"warning={warning}")
     if result.audit_path:
@@ -1591,6 +1614,11 @@ def main() -> int:
         help="Next Engineへ出荷実績CSVをアップロードします。--execute指定時のみ外部反映します。",
     )
     shipment_parser.add_argument(
+        "--confirm-upload",
+        action="store_true",
+        help="NEへの実反映を明示確認します。--execute --execute-upload に加えてこの指定がないと実反映しません。",
+    )
+    shipment_parser.add_argument(
         "--headed",
         action="store_true",
         help="ブラウザを表示して実行します。",
@@ -1612,12 +1640,41 @@ def main() -> int:
     shipment_import_parser.add_argument(
         "--write",
         action="store_true",
-        help="ネクストエンジン\\完成データ\\shipment_confirmation_import.csv を作成します。未指定時は確認のみです。",
+        help="ネクストエンジン\\完成データ\\yamato_to-neYYMMDDHHMM.csv（3列）を作成します。未指定時は確認のみです。",
     )
     shipment_import_parser.add_argument(
         "--order-nos",
         default="",
         help="対象のNext Engine伝票番号です。カンマ、空白、改行区切りに対応します。",
+    )
+    shipment_import_parser.add_argument(
+        "--scanned-codes",
+        default="",
+        help="納品書バーコードのスキャン値です。正規化して伝票番号として扱います（--order-nos と併用可）。",
+    )
+    shipment_import_parser.add_argument(
+        "--buyer-lookback-days",
+        type=int,
+        default=None,
+        help="購入者データの取込日数です。未指定時は KURIMA_SHIPMENT_BUYER_LOOKBACK_DAYS（既定20日）です。",
+    )
+    shipment_import_parser.add_argument(
+        "--clickpost-lookback-days",
+        type=int,
+        default=None,
+        help="クリックポスト送り状番号CSVの取込日数です。既定20日です。",
+    )
+    shipment_import_parser.add_argument(
+        "--letterpack-lookback-days",
+        type=int,
+        default=None,
+        help="レターパックCSVの取込日数です。既定30日です。",
+    )
+    shipment_import_parser.add_argument(
+        "--yamato-lookback-days",
+        type=int,
+        default=None,
+        help="ヤマト出荷データ（yamato-okurizyo）の取込日数です。既定30日です。",
     )
     shipment_import_parser.add_argument(
         "--preview-limit",
@@ -1630,11 +1687,21 @@ def main() -> int:
     shipment_upload_parser.add_argument(
         "--execute",
         action="store_true",
-        help="Next Engineへ出荷実績CSVを実際にアップロードします。",
+        help="Next Engineへ出荷実績CSVを実際にアップロードします。--confirm-upload も必要です。",
+    )
+    shipment_upload_parser.add_argument(
+        "--confirm-upload",
+        action="store_true",
+        help="NEへの実反映を明示確認します。--execute 単独では実反映しません。",
+    )
+    shipment_upload_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="アップロード前チェックのみ行います。既定動作です。",
     )
     shipment_upload_parser.add_argument(
         "--csv-file",
-        help="アップロードする出荷実績CSVを指定します。未指定時はネクストエンジン\\完成データ の最新CSVです。",
+        help="アップロードする出荷実績CSV（3列: 伝票番号,発送伝票番号,出荷予定日）を指定します。未指定時は 完成データ の最新 yamato_to-ne*.csv です。",
     )
     shipment_upload_parser.add_argument(
         "--headed",
@@ -1663,6 +1730,11 @@ def main() -> int:
     yamato_tracking_parser.add_argument(
         "--target-date",
         help="B2 Cloudの出荷予定日です。未指定時は当日です。",
+    )
+    yamato_tracking_parser.add_argument(
+        "--yamato-target-date",
+        dest="target_date",
+        help="--target-date の別名です（出荷確定画面と揃えた名前）。",
     )
     yamato_tracking_parser.add_argument(
         "--headed",
@@ -2456,6 +2528,7 @@ def main() -> int:
             fetch_yamato_tracking=args.fetch_yamato_tracking,
             write_import_csv=args.write_import_csv,
             execute_upload=args.execute_upload,
+            confirm_upload=args.confirm_upload,
             headed=args.headed,
             slow_mo_ms=args.slow_mo_ms,
             preview_limit=args.preview_limit,
@@ -2463,12 +2536,20 @@ def main() -> int:
     if args.command == "build-shipment-confirmation-csv":
         return build_shipment_confirmation_csv(
             write=args.write,
-            order_numbers=_parse_order_numbers(args.order_nos),
+            order_numbers=(
+                *_parse_order_numbers(args.order_nos),
+                *_parse_order_numbers(args.scanned_codes),
+            ),
             preview_limit=args.preview_limit,
+            buyer_lookback_days=args.buyer_lookback_days,
+            clickpost_lookback_days=args.clickpost_lookback_days,
+            letterpack_lookback_days=args.letterpack_lookback_days,
+            yamato_lookback_days=args.yamato_lookback_days,
         )
     if args.command == "upload-next-engine-shipment-confirmation":
         return upload_next_engine_shipment_confirmation(
             execute=args.execute,
+            confirm_upload=args.confirm_upload,
             csv_file=args.csv_file,
             headed=args.headed,
             slow_mo_ms=args.slow_mo_ms,

@@ -15,6 +15,31 @@
 {% endif %}
 
 <section class="panel{% if error %} mt-14{% endif %}">
+  <h2 class="panel-title">CSV作成からB2取込まで一括実行</h2>
+  <p class="panel-lead">「ヤマト用CSVを作成する」と「B2へ取込んで印刷する」を続けて自動実行します。完了後は開いたChromeで印刷だけ行ってください。</p>
+  <div class="flow">
+    <span class="flow-chip" data-chip="1"><span class="flow-num">1</span>NEデータ取得</span>
+    <span class="flow-chip" data-chip="2"><span class="flow-num">2</span>納品書PDF取得</span>
+    <span class="flow-chip" data-chip="3"><span class="flow-num">3</span>配送情報CSV取得</span>
+    <span class="flow-chip" data-chip="4"><span class="flow-num">4</span>住所補正</span>
+    <span class="flow-chip" data-chip="5"><span class="flow-num">5</span>B2取込CSV作成</span>
+    <span class="flow-chip" data-chip="6"><span class="flow-num">6</span>B2へ取込</span>
+  </div>
+
+  <form method="post" action="/yamato/run-full" data-progress-form data-progress-endpoint="/yamato/run-full/start">
+    <input type="hidden" name="slow_mo_ms" value="150">
+    <input type="hidden" name="preview_limit" value="30">
+    <div class="cta-wrap">
+      <button class="btn-cta" type="submit">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        CSV作成 → B2取込まで一括実行
+      </button>
+      <span class="run-note">所要 約4〜6分・実Chromeが開き、完了後は印刷のみ</span>
+    </div>
+  </form>
+</section>
+
+<section class="panel mt-14">
   <h2 class="panel-title">ヤマト用CSVを作成する</h2>
   <p class="panel-lead">この操作で、下記の流れを順に実行します。</p>
   <div class="flow">
@@ -71,6 +96,13 @@
           <span>
             <strong class="opt-title">納品書ステータスの詳細確認</strong>
             <span class="opt-desc">検証時のみ。対象を1件ずつ開いて前後ステータスを記録します。</span>
+          </span>
+        </label>
+        <label class="opt plain">
+          <input type="checkbox" name="test_restore_print_wait">
+          <span>
+            <strong class="opt-title">テストモード（実行後に印刷待ちへ戻す）</strong>
+            <span class="opt-desc">検証時のみ。納品書PDF取得で「印刷済み」に進んだ伝票を、処理の最後に「納品書印刷待ちへ復旧」で自動的に戻します。</span>
           </span>
         </label>
         <label class="opt plain">
@@ -213,9 +245,9 @@
   const forms = document.querySelectorAll("[data-progress-form]");
   let currentJobId = null;
 
-  // 粗い2段階: prepare=受注取得〜CSV作成(チップ①〜⑤), b2_import=B2取込(チップ⑥)
+  // prepare=受注取得〜CSV作成(チップ①〜⑤), b2_open/open/b2_import=B2取込(チップ⑥)
   const flowChips = [...document.querySelectorAll(".flow [data-chip]")];
-  const STEP_CHIPS = { ne_fetch: [1], invoice: [2], custom: [3], conversion: [4, 5], b2_import: [6] };
+  const STEP_CHIPS = { ne_fetch: [1], invoice: [2], custom: [3], conversion: [4, 5], b2_open: [6], open: [6], b2_import: [6] };
   const clearFlowChips = () => {
     for (const chip of flowChips) chip.classList.remove("is-active", "is-done", "is-failed");
   };

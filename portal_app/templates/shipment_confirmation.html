@@ -1,0 +1,807 @@
+{% extends "base.html" %}
+{% block title %}出荷確定 - くりまポータルツール{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1 class="page-title">出荷確定</h1>
+  <svg class="page-wave" width="62" height="8" viewBox="0 0 62 8" fill="none"><path d="M2 5C8 1.5 13 1.5 19 5s11 3.5 17 0 11-3.5 17 0 5 1 5 1" stroke="#3bb0d4" stroke-width="2" stroke-linecap="round"/></svg>
+  <p class="page-lead">出荷済み納品書のバーコードをスキャンし、出荷確定CSVを作成してネクストエンジンへ反映します。</p>
+</div>
+
+<section class="panel">
+  <h2 class="panel-title">1. 納品書バーコードをスキャン</h2>
+  <p class="panel-lead">入力欄は自動フォーカスされます。スキャナのEnterで1件ずつ追加されます。複数行・カンマ・空白区切りの貼り付けにも対応します。</p>
+  <div class="field-row">
+    <label class="field grow">
+      <span class="field-label">バーコード入力（Enterで追加）</span>
+      <input class="input" type="text" id="barcode-input" autofocus autocomplete="off" placeholder="例: D0000068531">
+    </label>
+    <button class="btn btn-primary" type="button" id="scan-add">追加</button>
+    <button class="btn" type="button" id="scan-clear">全クリア</button>
+  </div>
+  <p class="adv-note" id="scan-dup-note" hidden></p>
+
+  <div class="summary mt-14">
+    <div class="summary-card">
+      <div class="summary-k">スキャン件数</div>
+      <div class="summary-v" id="count-scanned">0 <span class="unit">件</span></div>
+    </div>
+    <div class="summary-card">
+      <div class="summary-k">重複除外件数</div>
+      <div class="summary-v" id="count-duplicates">0 <span class="unit">件</span></div>
+    </div>
+    <div class="summary-card">
+      <div class="summary-k">購入者一致件数</div>
+      <div class="summary-v" id="count-buyer">0 <span class="unit">件</span></div>
+    </div>
+    <div class="summary-card">
+      <div class="summary-k">発送伝票番号一致件数</div>
+      <div class="summary-v" id="count-tracking">0 <span class="unit">件</span></div>
+    </div>
+    <div class="summary-card">
+      <div class="summary-k">手動修正件数</div>
+      <div class="summary-v" id="count-manual">0 <span class="unit">件</span></div>
+    </div>
+    <div class="summary-card warn">
+      <div class="summary-k">未解決件数</div>
+      <div class="summary-v" id="count-unresolved">0 <span class="unit">件</span></div>
+    </div>
+  </div>
+
+  <details class="fold mt-14" id="scan-fold">
+    <summary>
+      スキャン一覧（<span id="scan-fold-count">0</span>件）
+      <span class="fold-hint">開閉</span>
+    </summary>
+    <div class="fold-body">
+      <div class="tbl-scroll">
+        <table class="tbl" id="scan-table">
+          <thead>
+            <tr><th>#</th><th>正規化伝票番号</th><th>操作</th></tr>
+          </thead>
+          <tbody id="scan-tbody">
+            <tr><td class="empty" colspan="3">まだスキャンがありません。ブラウザを更新しても一覧は保持されます。</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </details>
+</section>
+
+<section class="panel mt-14">
+  <h2 class="panel-title">2. 取込設定</h2>
+  <details class="adv-fold" id="settings-fold">
+    <summary>
+      <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#a79c8f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+      取込設定を開く（通常は変更不要）
+    </summary>
+    <div class="adv-body">
+      <p class="adv-note">マッピングに使う各データの取込日数と、ヤマト発行済データの取得日を指定します。</p>
+      <div class="field-row">
+    <label class="field">
+      <span class="field-label">購入者データ取込日数</span>
+      <input class="input w-120" type="number" min="1" id="buyer-lookback" name="buyer_lookback_days" value="{{ lookbacks.buyer }}">
+    </label>
+    <label class="field">
+      <span class="field-label">クリックポスト取込日数</span>
+      <input class="input w-120" type="number" min="1" id="clickpost-lookback" name="clickpost_lookback_days" value="{{ lookbacks.clickpost }}">
+    </label>
+    <label class="field">
+      <span class="field-label">レターパック取込日数</span>
+      <input class="input w-120" type="number" min="1" id="letterpack-lookback" name="letterpack_lookback_days" value="{{ lookbacks.letterpack }}">
+    </label>
+    <label class="field">
+      <span class="field-label">ヤマト出荷データ取込日数</span>
+      <input class="input w-120" type="number" min="1" id="yamato-lookback" name="yamato_lookback_days" value="{{ lookbacks.yamato }}">
+    </label>
+    <label class="field">
+      <span class="field-label">ヤマト出荷データ取得日（通常は今日）</span>
+      <input class="input w-150" type="text" id="yamato-target-date" name="target_date" value="{{ today }}" placeholder="YYYY/MM/DD">
+    </label>
+      </div>
+    </div>
+  </details>
+</section>
+
+<section class="panel mt-14">
+  <h2 class="panel-title">3. 実行</h2>
+  <div class="btn-row">
+    <form method="post" action="/shipment-confirmation/fetch-yamato/start" id="fetch-yamato-form" data-progress-form data-progress-endpoint="/shipment-confirmation/fetch-yamato/start" style="display:inline;">
+      <input type="hidden" name="target_date" value="">
+      <input type="hidden" name="execute" value="1">
+      <button class="btn" type="submit">ヤマト発行済データ取得</button>
+    </form>
+    <button class="btn btn-primary" type="button" id="reload-mapping">マッピング再読込</button>
+  </div>
+  <p class="adv-note">「ヤマト発行済データ取得」はヤマトB2から当日（または指定日）の発行済データCSVを取得して yamato-okurizyo へ保存し、完了後に自動でマッピング再読込を行います。「マッピング再読込」はスキャン済みバーコードを購入者・配送データと突合します。CSV作成とネクストエンジン反映は下のプレビューで内容を確認してから実行してください。</p>
+</section>
+
+<section class="panel mt-14">
+  <h2 class="panel-title">4. プレビュー・手動修正</h2>
+  <p class="panel-lead">伝票番号・発送伝票番号・出荷予定日・配送ソース・メモは直接編集できます。未一致の行は手動で修正するか、行を追加してください。出荷予定日が空の行は当日として出力されます。</p>
+  <div id="preview-warnings"></div>
+  <p class="adv-note" id="store-counts" hidden></p>
+  <div class="tbl-scroll mt-14">
+    <table class="tbl tbl-min-760" id="preview-table">
+      <thead>
+        <tr>
+          <th>店舗</th><th>受注番号</th><th>送り先名</th><th>伝票番号</th><th>発送伝票番号</th><th>出荷予定日</th><th>配送ソース</th><th>状態</th><th>警告</th><th>メモ</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="preview-tbody">
+        <tr><td class="empty" colspan="11">「マッピング再読込」を押すとプレビューが表示されます。</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="btn-row mt-14">
+    <button class="btn" type="button" id="add-manual-row">手動行追加</button>
+    <form method="post" action="/shipment-confirmation/create/start" id="create-form" data-progress-form data-progress-endpoint="/shipment-confirmation/create/start" style="display:inline;">
+      <input type="hidden" name="rows_json" value="">
+      <input type="hidden" name="scanned_codes" value="">
+      <button class="btn btn-primary" type="submit">出荷確定CSV作成</button>
+    </form>
+  </div>
+  <p class="adv-note">「出荷確定CSV作成」で、上の内容から3列（伝票番号,発送伝票番号,出荷予定日）のCSVを完成データへ出力します。作成後は下の「5. ネクストエンジンへ反映」で反映してください。</p>
+</section>
+
+<section class="panel mt-14">
+  <h2 class="panel-title">5. ネクストエンジンへ反映</h2>
+  <p class="panel-lead">実反映の前に必ず「アップロード前チェック」で候補CSVを確認してください。反映はネクストエンジンの受注状態を変更します。</p>
+  <div class="btn-row">
+    <button class="btn" type="button" id="upload-check-btn">アップロード前チェック</button>
+  </div>
+  <div id="upload-check-result" class="mt-14" hidden>
+    <dl class="kv">
+      <dt>アップロード候補CSV</dt><dd class="mono" id="uc-csv">-</dd>
+      <dt>ファイル更新日時</dt><dd id="uc-updated">-</dd>
+      <dt>行数</dt><dd id="uc-rows">-</dd>
+      <dt>ヘッダー</dt><dd class="mono" id="uc-headers">-</dd>
+      <dt>出荷予定日</dt><dd id="uc-dates">-</dd>
+    </dl>
+    <div id="uc-errors"></div>
+    <div id="uc-warnings"></div>
+    <div class="tbl-scroll mt-14">
+      <table class="tbl tbl-min-520">
+        <thead><tr><th>伝票番号</th><th>発送伝票番号</th><th>出荷予定日</th></tr></thead>
+        <tbody id="uc-preview"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <form method="post" action="/shipment-confirmation/upload/start" id="upload-form" data-progress-form data-progress-endpoint="/shipment-confirmation/upload/start" class="mt-14">
+    <input type="hidden" name="execute" value="1">
+    <input type="hidden" name="csv_file" value="">
+    <input type="hidden" name="preview_limit" value="30">
+    <label class="opt">
+      <input type="checkbox" id="confirm-upload" name="confirm_upload" value="on">
+      <span>
+        <strong class="opt-title">確認しました: このCSVをネクストエンジンへ反映します</strong>
+        <span class="opt-desc">アップロード前チェックで候補CSVと警告を確認してからチェックしてください。チェックなしでは反映されません。</span>
+      </span>
+    </label>
+    <div class="cta-wrap">
+      <button class="btn-cta" type="submit" id="upload-execute" disabled>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>
+        ネクストエンジンへ反映
+      </button>
+      <span class="run-note">「アップロード前チェックOK」＋確認チェックの両方が揃うと押せます</span>
+    </div>
+  </form>
+</section>
+
+<div id="progress-panel" class="progress-panel mt-14" hidden>
+  <div class="progress-head">
+    <div>
+      <h2 id="progress-title">処理状況</h2>
+      <p id="progress-message" class="progress-message">開始待ちです。</p>
+    </div>
+    <div class="progress-head-actions">
+      <span id="progress-status" class="badge">待機中</span>
+      <button type="button" id="progress-cancel" class="btn-stop" hidden>実行を中止</button>
+    </div>
+  </div>
+  <ol id="progress-steps" class="progress-steps"></ol>
+  <p id="progress-error" class="progress-error" hidden></p>
+  <div id="progress-result"></div>
+</div>
+
+<!-- 完了通知トースト（JSのalert()はブラウザ自動操作を止めるため使わない） -->
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<style>
+  .toast {
+    position: fixed;
+    right: 20px;
+    bottom: 20px;
+    z-index: 1200;
+    max-width: min(420px, calc(100vw - 40px));
+    padding: 14px 22px;
+    border-radius: 12px;
+    background: #1c7f4b;
+    color: #fff;
+    font-size: 15px;
+    font-weight: 700;
+    box-shadow: 0 6px 22px rgba(0, 0, 0, .28);
+  }
+  .toast.error { background: #b3261e; }
+</style>
+
+<script>
+(() => {
+  "use strict";
+  const STORAGE_KEY = "kurima_shipment_confirmation_scans_v1";
+
+  // --- バーコード正規化（サーバー側 normalize_barcode_value と同じ5規則） ---
+  const normalizeBarcode = (value) => {
+    let text = String(value || "").trim();
+    text = text.replace(/[Dd]/g, "");            // D / d 除去
+    text = text.split("00000").join("");          // 00000 除去
+    if (text.endsWith(".0")) text = text.slice(0, -2); // Excel由来の .0 除去
+    if (/^\d+$/.test(text)) {                     // 数値なら先頭ゼロを落とす
+      text = text.replace(/^0+(?=\d)/, "");
+    }
+    return text;
+  };
+
+  // --- スキャン一覧（localStorage 復元対応） ---
+  let scans = [];
+  let duplicateCount = 0;
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
+    if (saved && Array.isArray(saved.scans)) {
+      scans = saved.scans.filter((s) => s && s.normalized);
+      duplicateCount = Number(saved.duplicateCount) || 0;
+    }
+  } catch (e) { /* 破損データは無視して空から始める */ }
+
+  const saveScans = () => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ scans, duplicateCount }));
+    } catch (e) { /* 保存できなくても動作は続ける */ }
+  };
+
+  const barcodeInput = document.getElementById("barcode-input");
+  const scanTbody = document.getElementById("scan-tbody");
+  const dupNote = document.getElementById("scan-dup-note");
+
+  // --- プレビュー行（サーバーのマッピング結果＋手動修正・追加） ---
+  let rows = [];
+  let serverCounts = { buyer_matched: 0, tracking_matched: 0, unresolved: 0 };
+  // 店舗別件数はサーバー応答（payload.store_counts）を正とする（クライアント再集計はしない）。
+  let serverStoreCounts = null;
+  // 画面で行を編集・追加・削除したら true。未解決件数をサーバー算出値から
+  // 「同じ定義でのクライアント再計算」へ切り替える判定に使う。
+  let rowsDirty = false;
+
+  const EDITABLE = ["伝票番号", "発送伝票番号", "出荷予定日", "配送ソース", "メモ"];
+  const COLUMNS = ["店舗", "受注番号", "送り先名", "伝票番号", "発送伝票番号", "出荷予定日", "配送ソース", "状態", "警告", "メモ"];
+
+  const el = (id) => document.getElementById(id);
+
+  // 完了・失敗の明示通知（alert() はブラウザ自動操作を止めるためトーストで出す）。
+  let toastTimer = null;
+  const showToast = (text, kind) => {
+    const toast = el("toast");
+    toast.textContent = text;
+    toast.classList.toggle("error", kind === "error");
+    toast.hidden = false;
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { toast.hidden = true; }, 6000);
+  };
+
+  const updateCounts = () => {
+    el("count-scanned").firstChild.nodeValue = scans.length + " ";
+    el("count-duplicates").firstChild.nodeValue = duplicateCount + " ";
+    el("count-buyer").firstChild.nodeValue = serverCounts.buyer_matched + " ";
+    el("count-tracking").firstChild.nodeValue = serverCounts.tracking_matched + " ";
+    el("count-manual").firstChild.nodeValue = rows.filter((r) => r._manual).length + " ";
+    // 未解決件数はサーバー定義（状態 != OK）を正とする。マッピング直後はサーバー算出値
+    // （counts.unresolved）をそのまま表示し、画面で行を編集・追加・削除した後だけ
+    // 同じ定義（手動修正済みの行は解決扱い）でクライアント側から数え直す。
+    const unresolved = (!rowsDirty && typeof serverCounts.unresolved === "number")
+      ? serverCounts.unresolved
+      : rows.filter((r) => (r["状態"] || "") !== "OK" && (r["状態"] || "") !== "手動修正済み").length;
+    el("count-unresolved").firstChild.nodeValue = unresolved + " ";
+  };
+
+  const renderScans = () => {
+    el("scan-fold-count").textContent = String(scans.length);
+    scanTbody.innerHTML = "";
+    if (!scans.length) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = '<td class="empty" colspan="3">まだスキャンがありません。ブラウザを更新しても一覧は保持されます。</td>';
+      scanTbody.appendChild(tr);
+    } else {
+      scans.forEach((scan, index) => {
+        const tr = document.createElement("tr");
+        // 表示は正規化伝票番号のみ（スキャン値・追加時刻は保存はするが表には出さない）。
+        const cells = [String(index + 1), scan.normalized];
+        for (const value of cells) {
+          const td = document.createElement("td");
+          td.textContent = value;
+          tr.appendChild(td);
+        }
+        const actionTd = document.createElement("td");
+        const removeBtn = document.createElement("button");
+        removeBtn.type = "button";
+        removeBtn.className = "btn btn-sm";
+        removeBtn.textContent = "削除";
+        removeBtn.addEventListener("click", () => {
+          scans.splice(index, 1);
+          saveScans();
+          renderScans();
+          updateCounts();
+        });
+        actionTd.appendChild(removeBtn);
+        tr.appendChild(actionTd);
+        scanTbody.appendChild(tr);
+      });
+    }
+    updateCounts();
+  };
+
+  const showDupNote = (text) => {
+    dupNote.hidden = false;
+    dupNote.textContent = text;
+    setTimeout(() => { dupNote.hidden = true; }, 4000);
+  };
+
+  const addCodes = (text) => {
+    const tokens = String(text || "").split(/[\s,　]+/).filter(Boolean);
+    let added = 0;
+    let dup = 0;
+    for (const token of tokens) {
+      const normalized = normalizeBarcode(token);
+      if (!normalized) continue;
+      if (scans.some((scan) => scan.normalized === normalized)) {
+        dup += 1;
+        duplicateCount += 1;
+        continue;
+      }
+      const now = new Date();
+      const hh = String(now.getHours()).padStart(2, "0");
+      const mm = String(now.getMinutes()).padStart(2, "0");
+      const ss = String(now.getSeconds()).padStart(2, "0");
+      scans.push({ raw: token, normalized, addedAt: hh + ":" + mm + ":" + ss });
+      added += 1;
+    }
+    if (dup) showDupNote("重複スキャンを " + dup + " 件除外しました（同じ伝票番号は二重出力されません）。");
+    if (added || dup) {
+      saveScans();
+      renderScans();
+    }
+  };
+
+  barcodeInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      addCodes(barcodeInput.value);
+      barcodeInput.value = "";
+    }
+  });
+  barcodeInput.addEventListener("paste", (event) => {
+    const text = (event.clipboardData || window.clipboardData).getData("text");
+    if (/[\s,　]/.test(String(text || "").trim())) {
+      event.preventDefault();
+      addCodes(text);
+      barcodeInput.value = "";
+    }
+  });
+  el("scan-add").addEventListener("click", () => {
+    addCodes(barcodeInput.value);
+    barcodeInput.value = "";
+    barcodeInput.focus();
+  });
+  el("scan-clear").addEventListener("click", () => {
+    if (scans.length && !window.confirm("スキャン一覧をすべてクリアしますか？")) return;
+    scans = [];
+    duplicateCount = 0;
+    rows = [];
+    serverCounts = { buyer_matched: 0, tracking_matched: 0, unresolved: 0 };
+    serverStoreCounts = null;
+    rowsDirty = false;
+    saveScans();
+    renderScans();
+    renderPreview();
+    barcodeInput.focus();
+  });
+
+  // --- プレビュー表（手動編集・手動追加） ---
+  const previewTbody = document.getElementById("preview-tbody");
+  const previewWarnings = document.getElementById("preview-warnings");
+
+  const noteBox = (kind, title, items) => {
+    if (!items || !items.length) return "";
+    const li = items.map((item) => {
+      const div = document.createElement("div");
+      div.textContent = item;
+      return "<li>" + div.innerHTML + "</li>";
+    }).join("");
+    return '<div class="note ' + kind + ' mt-14"><div class="note-title">' + title + '</div><ul class="note-list">' + li + "</ul></div>";
+  };
+
+  const markManual = (row) => {
+    row._manual = true;
+    row["状態"] = "手動修正済み";
+    rowsDirty = true;
+  };
+
+  // 店舗ごとの件数表示。サーバー応答（payload.store_counts）を単一の真実として表示する
+  // （マッピング結果の件数であり、画面上の手動行とは独立）。store_counts が無い古い応答の
+  // ときだけ、従来どおりプレビュー行から集計する（店舗が空の行は「店舗未一致」）。
+  const renderStoreCounts = () => {
+    const box = el("store-counts");
+    let entries = [];
+    if (Array.isArray(serverStoreCounts)) {
+      entries = serverStoreCounts.map((item) => [item.store || "店舗未一致", Number(item.count) || 0]);
+    } else if (rows.length) {
+      const counter = new Map();
+      for (const row of rows) {
+        const store = row["店舗"] || "店舗未一致";
+        counter.set(store, (counter.get(store) || 0) + 1);
+      }
+      entries = Array.from(counter.entries());
+    }
+    if (!entries.length) {
+      box.hidden = true;
+      box.textContent = "";
+      return;
+    }
+    box.textContent = "店舗別件数 — " + entries.map(([store, count]) => store + ": " + count + "件").join(" / ");
+    box.hidden = false;
+  };
+
+  const renderPreview = () => {
+    renderStoreCounts();
+    previewTbody.innerHTML = "";
+    if (!rows.length) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = '<td class="empty" colspan="11">「マッピング再読込」を押すとプレビューが表示されます。</td>';
+      previewTbody.appendChild(tr);
+      updateCounts();
+      return;
+    }
+    rows.forEach((row, index) => {
+      const tr = document.createElement("tr");
+      for (const column of COLUMNS) {
+        const td = document.createElement("td");
+        if (EDITABLE.includes(column)) {
+          const input = document.createElement("input");
+          input.className = "input";
+          input.style.minWidth = "7em";
+          input.value = row[column] || "";
+          input.addEventListener("change", () => {
+            row[column] = input.value.trim();
+            markManual(row);
+            tr.querySelector("[data-status]").textContent = row["状態"];
+            updateCounts();
+          });
+          td.appendChild(input);
+        } else {
+          td.textContent = row[column] || "";
+          if (column === "状態") td.setAttribute("data-status", "1");
+        }
+        tr.appendChild(td);
+      }
+      const actionTd = document.createElement("td");
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.className = "btn btn-sm";
+      removeBtn.textContent = "削除";
+      removeBtn.addEventListener("click", () => {
+        rows.splice(index, 1);
+        rowsDirty = true;
+        renderPreview();
+      });
+      actionTd.appendChild(removeBtn);
+      tr.appendChild(actionTd);
+      previewTbody.appendChild(tr);
+    });
+    updateCounts();
+  };
+
+  // 手動追加行の出荷予定日は「当日（実行日）」を既定値にする。
+  const todayString = () => {
+    const now = new Date();
+    return now.getFullYear() + "/" + String(now.getMonth() + 1).padStart(2, "0") + "/" + String(now.getDate()).padStart(2, "0");
+  };
+
+  el("add-manual-row").addEventListener("click", () => {
+    rows.push({
+      "店舗": "", "受注番号": "", "送り先名": "",
+      "伝票番号": "", "発送伝票番号": "", "出荷予定日": todayString(),
+      "配送ソース": "手動入力", "状態": "手動修正済み", "警告": "", "メモ": "",
+      _manual: true,
+    });
+    rowsDirty = true;
+    renderPreview();
+  });
+
+  const settingsBody = () => {
+    const body = new URLSearchParams();
+    body.set("buyer_lookback_days", el("buyer-lookback").value);
+    body.set("clickpost_lookback_days", el("clickpost-lookback").value);
+    body.set("letterpack_lookback_days", el("letterpack-lookback").value);
+    body.set("yamato_lookback_days", el("yamato-lookback").value);
+    return body;
+  };
+
+  const reloadBtn = el("reload-mapping");
+  // マッピング再読込。成功したときだけ「マッピング完了しました」を通知する
+  // （実際に走っていないのに完了通知は出さない）。
+  const reloadMapping = async () => {
+    if (!scans.length) {
+      previewWarnings.innerHTML = noteBox("warn", "スキャンがありません", ["先に納品書バーコードをスキャンしてください。"]);
+      showToast("スキャンがないため、マッピングは実行していません。", "error");
+      return false;
+    }
+    reloadBtn.disabled = true;
+    reloadBtn.textContent = "読込中…";
+    try {
+      const body = settingsBody();
+      body.set("scanned_codes", scans.map((scan) => scan.normalized).join(" "));
+      body.set("preview_limit", "500");
+      const response = await fetch("/shipment-confirmation/preview", { method: "POST", body });
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      const payload = await response.json();
+      rows = (payload.rows || []).map((row) => Object.assign({ "メモ": "", _manual: false }, row));
+      serverCounts = payload.counts || serverCounts;
+      // 店舗別件数・未解決件数はサーバー応答を正として表示する。
+      serverStoreCounts = Array.isArray(payload.store_counts) ? payload.store_counts : null;
+      rowsDirty = false;
+      previewWarnings.innerHTML = noteBox("warn", "マッピングの注意", payload.warnings || []);
+      renderPreview();
+      showToast("マッピング完了しました（" + rows.length + "件）");
+      return true;
+    } catch (error) {
+      previewWarnings.innerHTML = noteBox("error", "マッピングに失敗しました", [String(error && error.message || error)]);
+      showToast("マッピングに失敗しました。", "error");
+      return false;
+    } finally {
+      reloadBtn.disabled = false;
+      reloadBtn.textContent = "マッピング再読込";
+    }
+  };
+  reloadBtn.addEventListener("click", () => { reloadMapping(); });
+
+  // --- アップロード前チェック（NE反映 dry-run） ---
+  let lastCheck = null;
+  const confirmUpload = el("confirm-upload");
+  const uploadExecuteBtn = el("upload-execute");
+
+  const refreshUploadButton = () => {
+    uploadExecuteBtn.disabled = !(lastCheck && lastCheck.ready_to_upload && confirmUpload.checked);
+  };
+  confirmUpload.addEventListener("change", refreshUploadButton);
+
+  el("upload-check-btn").addEventListener("click", async () => {
+    const button = el("upload-check-btn");
+    button.disabled = true;
+    button.textContent = "チェック中…";
+    try {
+      const body = new URLSearchParams();
+      body.set("preview_limit", "30");
+      const response = await fetch("/shipment-confirmation/upload-check", { method: "POST", body });
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      lastCheck = await response.json();
+      el("upload-check-result").hidden = false;
+      el("uc-csv").textContent = lastCheck.upload_csv || "候補なし";
+      el("uc-updated").textContent = lastCheck.updated_at || "-";
+      el("uc-rows").textContent = lastCheck.source_rows + " 件";
+      el("uc-headers").textContent = (lastCheck.source_headers || []).join(",") || "-";
+      el("uc-dates").textContent = (lastCheck.shipping_dates || []).join(", ") || "-";
+      el("uc-errors").innerHTML = noteBox("error", "エラー（反映できません）", lastCheck.errors || []);
+      el("uc-warnings").innerHTML = noteBox("warn", "警告（内容を確認してください）", lastCheck.warnings || []);
+      const ucPreview = el("uc-preview");
+      ucPreview.innerHTML = "";
+      for (const row of lastCheck.preview_rows || []) {
+        const tr = document.createElement("tr");
+        for (const key of ["伝票番号", "発送伝票番号", "出荷予定日"]) {
+          const td = document.createElement("td");
+          td.textContent = row[key] || "";
+          tr.appendChild(td);
+        }
+        ucPreview.appendChild(tr);
+      }
+      document.querySelector("#upload-form input[name=csv_file]").value = lastCheck.upload_csv || "";
+      refreshUploadButton();
+    } catch (error) {
+      el("upload-check-result").hidden = false;
+      el("uc-errors").innerHTML = noteBox("error", "チェックに失敗しました", [String(error && error.message || error)]);
+      lastCheck = null;
+      refreshUploadButton();
+    } finally {
+      button.disabled = false;
+      button.textContent = "アップロード前チェック";
+    }
+  });
+
+  // --- 進捗ジョブ（既存 /progress ポーリングと同じ流儀） ---
+  const panel = document.getElementById("progress-panel");
+  const title = document.getElementById("progress-title");
+  const message = document.getElementById("progress-message");
+  const statusBadge = document.getElementById("progress-status");
+  const stepsList = document.getElementById("progress-steps");
+  const errorBox = document.getElementById("progress-error");
+  const resultBox = document.getElementById("progress-result");
+  const cancelBtn = document.getElementById("progress-cancel");
+  let currentJobId = null;
+  let currentJobKind = null;
+
+  const statusLabels = { queued: "待機中", running: "処理中", completed: "完了", failed: "エラー", cancelled: "中止" };
+  const stepLabels = { pending: "待機中", running: "処理中", completed: "完了", failed: "エラー" };
+
+  const renderResult = (job) => {
+    resultBox.innerHTML = "";
+    if (job.status !== "completed" || !job.result) return;
+    const dl = document.createElement("dl");
+    dl.className = "kv mt-14";
+    const labels = {
+      output_csv: "出力CSV", output_rows: "出力件数", unresolved: "未解決",
+      export_csv: "保存先CSV", source_rows: "行数", target_date: "対象日",
+      upload_csv: "アップロードCSV", executed: "実反映", ready_to_upload: "反映可",
+      confirmation_text: "NE結果ページ", warnings: "警告", ready_to_import: "取込可",
+    };
+    for (const [key, value] of Object.entries(job.result)) {
+      if (value === null || value === undefined || value === "") continue;
+      const dt = document.createElement("dt");
+      dt.textContent = labels[key] || key;
+      const dd = document.createElement("dd");
+      dd.className = "mono";
+      dd.textContent = Array.isArray(value) ? value.join(" / ") : String(value);
+      dl.append(dt, dd);
+    }
+    resultBox.appendChild(dl);
+  };
+
+  const render = (job) => {
+    panel.hidden = false;
+    panel.classList.toggle("ok", job.status === "completed");
+    panel.classList.toggle("error", job.status === "failed" || job.status === "cancelled");
+    panel.classList.toggle("warn", job.status === "running" || job.status === "queued");
+    const active = job.status === "running" || job.status === "queued";
+    if (cancelBtn) cancelBtn.hidden = !active;
+    title.textContent = job.title || "処理状況";
+    message.textContent = job.message || "";
+    statusBadge.textContent = statusLabels[job.status] || job.status;
+    stepsList.innerHTML = "";
+    for (const step of job.steps || []) {
+      const item = document.createElement("li");
+      item.className = "progress-step is-" + step.status;
+      const dot = document.createElement("span");
+      dot.className = "step-dot";
+      const body = document.createElement("div");
+      const label = document.createElement("strong");
+      label.textContent = step.label;
+      const detail = document.createElement("small");
+      detail.textContent = (stepLabels[step.status] || step.status) + (step.detail ? " - " + step.detail : "");
+      body.append(label, detail);
+      item.append(dot, body);
+      stepsList.appendChild(item);
+    }
+    errorBox.hidden = !job.error;
+    errorBox.textContent = job.error || "";
+    renderResult(job);
+  };
+
+  const enableButtons = () => {
+    for (const button of document.querySelectorAll("[data-progress-form] button")) button.disabled = false;
+    refreshUploadButton();
+  };
+
+  const poll = async (jobId) => {
+    const response = await fetch("/progress/" + jobId, { cache: "no-store" });
+    if (!response.ok) throw new Error("進捗を取得できませんでした。");
+    const job = await response.json();
+    render(job);
+    if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") {
+      enableButtons();
+      if (cancelBtn) { cancelBtn.hidden = true; cancelBtn.disabled = false; cancelBtn.textContent = "実行を中止"; }
+      // ヤマト発行済データ取得が成功したら、自動でマッピング再読込を行う。
+      // 取得が失敗・中止のときは再読込せず、エラーのまま止める。
+      if (currentJobKind === "fetch") {
+        currentJobKind = null;
+        if (job.status === "completed") {
+          await reloadMapping();
+        } else {
+          showToast("ヤマト発行済データ取得が完了しなかったため、マッピング再読込は行っていません。", "error");
+        }
+      }
+      return;
+    }
+    setTimeout(() => poll(jobId).catch(showError), 1000);
+  };
+
+  const showError = (error) => {
+    panel.hidden = false;
+    panel.classList.remove("ok", "warn");
+    panel.classList.add("error");
+    title.textContent = "処理状況";
+    message.textContent = "処理を開始できませんでした。";
+    statusBadge.textContent = "エラー";
+    errorBox.hidden = false;
+    errorBox.textContent = (error && error.message) || String(error);
+    enableButtons();
+  };
+
+  // フォーム送信前に、画面の状態（スキャン・編集済み行・設定）を hidden へ反映する。
+  const prepareForm = (form) => {
+    const setValue = (name, value) => {
+      const input = form.querySelector('input[name="' + name + '"]');
+      if (input) input.value = value;
+    };
+    if (form.id === "fetch-yamato-form") {
+      setValue("target_date", el("yamato-target-date").value.trim());
+    }
+    if (form.id === "create-form") {
+      const payload = rows.map((row) => {
+        const record = {};
+        for (const column of COLUMNS) record[column] = row[column] || "";
+        return record;
+      });
+      setValue("rows_json", payload.length ? JSON.stringify(payload) : "");
+      setValue("scanned_codes", scans.map((scan) => scan.normalized).join(" "));
+      for (const [key, value] of settingsBody().entries()) {
+        let input = form.querySelector('input[name="' + key + '"]');
+        if (!input) {
+          input = document.createElement("input");
+          input.type = "hidden";
+          input.name = key;
+          form.appendChild(input);
+        }
+        input.value = value;
+      }
+    }
+  };
+
+  for (const form of document.querySelectorAll("[data-progress-form]")) {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const endpoint = form.dataset.progressEndpoint;
+      if (!endpoint) { form.submit(); return; }
+      if (form.id === "create-form" && !rows.length && !scans.length) {
+        showError(new Error("先にバーコードをスキャンし、マッピングを実行してください。"));
+        return;
+      }
+      if (form.id === "upload-form" && !confirmUpload.checked) {
+        showError(new Error("確認チェックボックスにチェックしてください。"));
+        return;
+      }
+      prepareForm(form);
+      // fetch へ FormData を渡すと multipart になりサーバーの parse_qs が読めないため、
+      // URLSearchParams で urlencoded 送信する（既存ページと同じ流儀）。
+      const body = new URLSearchParams(new FormData(form, event.submitter));
+      for (const button of document.querySelectorAll("[data-progress-form] button")) button.disabled = true;
+      render({ title: "処理状況", status: "queued", message: "ジョブを開始しています。", steps: [] });
+      try {
+        const response = await fetch(endpoint, { method: "POST", body });
+        if (!response.ok) {
+          const text = await response.text().catch(() => "");
+          throw new Error(text || "処理を開始できませんでした。");
+        }
+        const payload = await response.json();
+        currentJobId = payload.job_id;
+        currentJobKind = form.id === "fetch-yamato-form" ? "fetch" : null;
+        if (cancelBtn) { cancelBtn.hidden = false; cancelBtn.disabled = false; cancelBtn.textContent = "実行を中止"; }
+        await poll(payload.job_id);
+      } catch (error) {
+        showError(error);
+      }
+    });
+  }
+
+  if (cancelBtn) {
+    cancelBtn.addEventListener("click", async () => {
+      if (!currentJobId) return;
+      cancelBtn.disabled = true;
+      cancelBtn.textContent = "中止しています…";
+      try {
+        await fetch("/progress/" + currentJobId + "/cancel", { method: "POST" });
+      } catch (e) { /* ポーリングが中止状態を拾う */ }
+    });
+  }
+
+  renderScans();
+  renderPreview();
+  barcodeInput.focus();
+})();
+</script>
+{% endblock %}

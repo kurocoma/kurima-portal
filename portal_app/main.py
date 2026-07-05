@@ -1,9 +1,10 @@
 ﻿from __future__ import annotations
 
 import csv
+import json
 import subprocess
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import parse_qs, quote
 
@@ -36,7 +37,16 @@ from portal_app.services.next_engine_downloader import (
 from portal_app.services.next_engine_order_status import restore_next_engine_print_wait_batch_sync
 from portal_app.services.paths import candidate_portal_roots, find_portal_paths, latest_order_csv
 from portal_app.services.progress_jobs import JobCancelled, progress_jobs, read_job_history
-from portal_app.services.shipment_confirmation import confirm_next_engine_shipment_sync
+from portal_app.services.shipment_confirmation import (
+    confirm_next_engine_shipment_sync,
+    create_shipment_slip_import_csv,
+    download_yamato_tracking_export_sync,
+    preview_next_engine_shipment_upload,
+    preview_shipment_slip_import,
+    shipment_lookback_defaults,
+    upload_next_engine_shipment_csv_sync,
+    write_shipment_confirmation_rows,
+)
 from portal_app.services.takaesu_orders import (
     create_takaesu_order_sheet_csv,
     default_takaesu_order_sheet_csv_path,
@@ -190,6 +200,25 @@ def _yamato_restore_order_numbers_from_prepare_result(prepare_result) -> tuple[s
     invoice = getattr(prepare_result, "invoice", None)
     before_list = getattr(invoice, "before_list", None)
     return tuple(getattr(before_list, "order_numbers", tuple()) or tuple())
+
+
+def _yamato_printed_orders_notice(prepare_result, restore_result) -> str:
+    """処理が途中で止まったとき、「印刷済み」へ進んだ伝票番号を利用者へ必ず明示する文。
+
+    テストモードの復旧が完了済み（restore_result あり）の場合は、既に戻っているため何も出さない。
+    """
+    if prepare_result is None or restore_result is not None:
+        return ""
+    invoice = getattr(prepare_result, "invoice", None)
+    if invoice is None or not invoice.executed or not invoice.downloaded_file:
+        return ""
+    orders = _yamato_restore_order_numbers_from_prepare_result(prepare_result)
+    if not orders:
+        return ""
+    return (
+        f"※納品書印刷で「印刷済み」へ変更済みの伝票: {', '.join(orders)}"
+        "（『その他の操作・納品書印刷待ちへ復旧』で戻せます）"
+    )
 
 
 def _path_text(value) -> str | None:
@@ -870,8 +899,23 @@ def clickpost_download_letterpack_pdf(filename: str, disposition: str = "attachm
     )
 
 
-@app.get("/shipment-confirmation")
+@app.get("/shipment-confirmation", response_class=HTMLResponse)
+def shipment_confirmation_page(request: Request):
+    # 出荷確定のWeb UI。マッピングや候補CSVの解決は重い＋実データ依存のため
+    # GET では実行せず、画面のボタン（preview / upload-check / start系）から呼ぶ。
+    return templates.TemplateResponse(
+        "shipment_confirmation.html",
+        {
+            "request": request,
+            "lookbacks": shipment_lookback_defaults(),
+            "today": date.today().strftime("%Y/%m/%d"),
+        },
+    )
+
+
+@app.get("/shipment-confirmation/status")
 def shipment_confirmation_status():
+    # 旧 GET /shipment-confirmation のJSONステータス（互換用に退避）。
     result = confirm_next_engine_shipment_sync(execute=False, write_audit=False)
     return {
         "flow_id": result.flow_id,
@@ -887,6 +931,298 @@ def shipment_confirmation_status():
         ],
         "side_effects": result.side_effects,
     }
+
+
+def _shipment_lookback_arg(form: dict[str, str], key: str) -> int | None:
+    value = _form_int(form, key, 0)
+    return value if value > 0 else None
+
+
+@app.post("/shipment-confirmation/preview")
+async def shipment_confirmation_preview(request: Request):
+    # スキャン済みバーコードと購入者・配送データのマッピング（同期・状態変更なし）。
+    form = await _read_form(request)
+    codes = _parse_order_numbers(form.get("scanned_codes"))
+    preview_limit = max(1, min(_form_int(form, "preview_limit", 500), 1000))
+    result = await run_in_threadpool(
+        preview_shipment_slip_import,
+        order_numbers=codes,
+        preview_limit=preview_limit,
+        buyer_lookback_days=_shipment_lookback_arg(form, "buyer_lookback_days"),
+        clickpost_lookback_days=_shipment_lookback_arg(form, "clickpost_lookback_days"),
+        letterpack_lookback_days=_shipment_lookback_arg(form, "letterpack_lookback_days"),
+        yamato_lookback_days=_shipment_lookback_arg(form, "yamato_lookback_days"),
+    )
+    return {
+        "rows": [dict(row) for row in result.preview_rows],
+        "counts": {
+            "scanned": result.scanned_count,
+            "duplicates": result.duplicate_count,
+            "buyer_matched": result.buyer_matched_count,
+            "tracking_matched": result.tracking_matched_count,
+            "unresolved": result.unresolved_count,
+        },
+        # 店舗ごとの件数（出現順）。プレビューの「店舗別件数」表示に使う。
+        "store_counts": [
+            {"store": store, "count": count} for store, count in result.store_counts
+        ],
+        "buyer_rows": result.buyer_rows,
+        "tracking_rows": result.tracking_rows,
+        "source_files": len(result.source_files),
+        "warnings": list(result.warnings),
+    }
+
+
+@app.post("/shipment-confirmation/create/start")
+async def shipment_confirmation_create_start(request: Request):
+    # 画面で確定した行（手動修正・追加込み）から3列の出荷確定CSVを作成するジョブ。
+    form = await _read_form(request)
+    rows_json = form.get("rows_json", "").strip()
+    codes = _parse_order_numbers(form.get("scanned_codes"))
+    rows: list[dict[str, str]] = []
+    if rows_json:
+        try:
+            parsed = json.loads(rows_json)
+        except json.JSONDecodeError:
+            return PlainTextResponse("rows_json をJSONとして読み取れません。", status_code=400)
+        if not isinstance(parsed, list):
+            return PlainTextResponse("rows_json は行の配列で指定してください。", status_code=400)
+        rows = [row for row in parsed if isinstance(row, dict)]
+    if not rows and not codes:
+        return PlainTextResponse(
+            "出力する行がありません。バーコードをスキャンしてマッピングを実行してください。",
+            status_code=400,
+        )
+    lookbacks = {
+        "buyer_lookback_days": _shipment_lookback_arg(form, "buyer_lookback_days"),
+        "clickpost_lookback_days": _shipment_lookback_arg(form, "clickpost_lookback_days"),
+        "letterpack_lookback_days": _shipment_lookback_arg(form, "letterpack_lookback_days"),
+        "yamato_lookback_days": _shipment_lookback_arg(form, "yamato_lookback_days"),
+    }
+
+    def worker(job_id: str) -> None:
+        progress_jobs.update_step(job_id, "create_csv", status="running")
+        if rows:
+            result = write_shipment_confirmation_rows(rows, preview_limit=30)
+        else:
+            result = create_shipment_slip_import_csv(
+                order_numbers=codes,
+                preview_limit=30,
+                **lookbacks,
+            )
+        if result.output_csv is None:
+            progress_jobs.update_step(job_id, "create_csv", status="failed")
+            progress_jobs.fail(
+                job_id,
+                "出荷確定CSVを作成できませんでした: " + " / ".join(result.warnings[:3]),
+            )
+            return
+        progress_jobs.update_step(
+            job_id,
+            "create_csv",
+            status="completed",
+            detail=f"{result.output_rows}件を出力しました。",
+        )
+        progress_jobs.finish(
+            job_id,
+            message=f"出荷確定CSVを作成しました（{result.output_rows}件）。",
+            result={
+                "output_csv": _path_text(result.output_csv),
+                "output_rows": result.output_rows,
+                "unresolved": result.unresolved_count,
+                "warnings": list(result.warnings)[:5],
+            },
+        )
+
+    job_id = progress_jobs.start(
+        title="出荷確定CSV作成",
+        steps=[("create_csv", "出荷確定CSV作成")],
+        worker=worker,
+        workflow="shipment_confirmation_create",
+        metadata={"rows": len(rows), "scanned": len(codes)},
+    )
+    return {"job_id": job_id}
+
+
+@app.post("/shipment-confirmation/fetch-yamato/start")
+async def shipment_confirmation_fetch_yamato_start(request: Request):
+    # ヤマトB2の発行済データ取得。execute なしは dry-run（既存CSVの検証・候補表示のみ）。
+    form = await _read_form(request)
+    execute = _form_bool(form, "execute")
+    target_date = form.get("target_date", "").strip() or None
+    headed = _form_headed(form)
+    slow_mo_ms = _form_int(form, "slow_mo_ms", 150 if headed else 0)
+
+    def worker(job_id: str) -> None:
+        progress_jobs.update_step(job_id, "fetch", status="running")
+        result = download_yamato_tracking_export_sync(
+            execute=execute,
+            target_date=target_date,
+            headless=not headed,
+            slow_mo_ms=slow_mo_ms,
+            preview_limit=20,
+        )
+        if execute and result.skipped_reason:
+            progress_jobs.update_step(job_id, "fetch", status="failed", detail=result.skipped_reason)
+            # B2LoginError 等の原因メッセージ（time_outside/needs_2fa 等）をそのまま利用者へ伝える。
+            # B2側要因の切り分け情報が途中で切れないよう、状態名（B2LOGIN_STATE=）を先頭に
+            # 最大4件まで表示する。
+            state_notes = [w for w in result.warnings if w.startswith("B2LOGIN_STATE=")]
+            other_notes = [w for w in result.warnings if not w.startswith("B2LOGIN_STATE=")]
+            detail = " / ".join([*state_notes, *other_notes][:4])
+            progress_jobs.fail(
+                job_id,
+                f"発行済データを取得できませんでした（{result.skipped_reason}）。"
+                + (f" {detail}" if detail else ""),
+            )
+            return
+        progress_jobs.update_step(
+            job_id,
+            "fetch",
+            status="completed",
+            detail=f"{result.source_rows}件（{result.target_date}）",
+        )
+        progress_jobs.finish(
+            job_id,
+            message=(
+                "ヤマト発行済データを取得しました。"
+                if execute
+                else "ヤマト発行済データを確認しました（取得は行っていません）。"
+            ),
+            result={
+                "executed": result.executed,
+                "target_date": result.target_date,
+                "export_csv": _path_text(result.export_csv),
+                "source_rows": result.source_rows,
+                "ready_to_import": result.ready_to_import,
+                "warnings": list(result.warnings)[:5],
+            },
+        )
+
+    job_id = progress_jobs.start(
+        title="ヤマト発行済データ取得",
+        steps=[("fetch", "発行済データ取得" if execute else "発行済データ確認（dry-run）")],
+        worker=worker,
+        workflow="shipment_confirmation_fetch_yamato",
+        metadata={"execute": execute, "target_date": target_date, "headed": headed},
+    )
+    return {"job_id": job_id}
+
+
+@app.post("/shipment-confirmation/upload-check")
+async def shipment_confirmation_upload_check(request: Request):
+    # NE反映のアップロード前チェック（dry-run・状態変更なし・同期）。
+    form = await _read_form(request)
+    csv_file = form.get("csv_file", "").strip()
+    preview_limit = max(1, min(_form_int(form, "preview_limit", 30), 100))
+    result = await run_in_threadpool(
+        preview_next_engine_shipment_upload,
+        upload_csv=Path(csv_file) if csv_file else None,
+        preview_limit=preview_limit,
+    )
+    updated_at = None
+    if result.upload_csv is not None and result.upload_csv.is_file():
+        updated_at = datetime.fromtimestamp(result.upload_csv.stat().st_mtime).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+    shipping_dates = sorted(
+        {row.get("出荷予定日", "") for row in result.preview_rows if row.get("出荷予定日")}
+    )
+    return {
+        "ready_to_upload": result.ready_to_upload,
+        "upload_csv": _path_text(result.upload_csv),
+        "updated_at": updated_at,
+        "source_rows": result.source_rows,
+        "source_headers": list(result.source_headers),
+        "shipping_dates": shipping_dates,
+        "errors": list(result.errors),
+        "warnings": list(result.warnings),
+        "preview_rows": [dict(row) for row in result.preview_rows],
+    }
+
+
+@app.post("/shipment-confirmation/upload/start")
+async def shipment_confirmation_upload_start(request: Request):
+    # NE反映ジョブ。execute（実反映）は確認チェック（confirm_upload）がないと開始しない。
+    # サービス層（upload_next_engine_shipment_csv）でも同じガードを二重に持つ。
+    form = await _read_form(request)
+    execute = _form_bool(form, "execute")
+    confirm_upload = _form_bool(form, "confirm_upload")
+    if execute and not confirm_upload:
+        return PlainTextResponse(
+            "「確認しました: このCSVをネクストエンジンへ反映します」にチェックしてください。",
+            status_code=400,
+        )
+    csv_file = form.get("csv_file", "").strip()
+    headed = _form_headed(form)
+    slow_mo_ms = _form_int(form, "slow_mo_ms", 150 if headed else 0)
+    preview_limit = max(1, min(_form_int(form, "preview_limit", 30), 100))
+
+    steps = [("check", "候補CSV検証")]
+    if execute:
+        steps.append(("upload", "ネクストエンジンへ反映"))
+
+    def worker(job_id: str) -> None:
+        progress_jobs.update_step(job_id, "check", status="running")
+        result = upload_next_engine_shipment_csv_sync(
+            execute=execute,
+            confirm_upload=confirm_upload,
+            upload_csv=Path(csv_file) if csv_file else None,
+            headless=not headed,
+            slow_mo_ms=slow_mo_ms,
+            preview_limit=preview_limit,
+        )
+        if not result.ready_to_upload:
+            progress_jobs.update_step(job_id, "check", status="failed")
+            progress_jobs.fail(
+                job_id,
+                "アップロード候補CSVの検証に失敗しました: "
+                + " / ".join([*result.errors, *result.warnings][:3]),
+            )
+            return
+        progress_jobs.update_step(
+            job_id,
+            "check",
+            status="completed",
+            detail=f"{result.source_rows}件",
+        )
+        if execute:
+            if result.executed and not result.skipped_reason:
+                progress_jobs.update_step(job_id, "upload", status="completed")
+            else:
+                progress_jobs.update_step(
+                    job_id, "upload", status="failed", detail=result.skipped_reason
+                )
+                progress_jobs.fail(
+                    job_id,
+                    f"ネクストエンジンへの反映が完了しませんでした（{result.skipped_reason or '理由不明'}）。",
+                )
+                return
+        progress_jobs.finish(
+            job_id,
+            message=(
+                "ネクストエンジンへ反映しました。結果ページ本文を確認してください。"
+                if execute
+                else "アップロード前チェックが完了しました（NEへは反映していません）。"
+            ),
+            result={
+                "executed": result.executed,
+                "ready_to_upload": result.ready_to_upload,
+                "upload_csv": _path_text(result.upload_csv),
+                "source_rows": result.source_rows,
+                "confirmation_text": (result.confirmation_text or "")[:300] or None,
+                "warnings": list(result.warnings)[:5],
+            },
+        )
+
+    job_id = progress_jobs.start(
+        title="ネクストエンジンへ反映" if execute else "NE反映 アップロード前チェック",
+        steps=steps,
+        worker=worker,
+        workflow="shipment_confirmation_upload",
+        metadata={"execute": execute, "confirm_upload": confirm_upload, "headed": headed},
+    )
+    return {"job_id": job_id}
 
 
 @app.get("/takaesu")
@@ -1540,11 +1876,13 @@ async def yamato_run_selected(request: Request):
     csv_file_raw = form.get("csv_file", "").strip()
     headed = _form_headed(form)
     verify_invoice_statuses = _form_bool(form, "verify_invoice_statuses")
+    test_restore_print_wait = _form_bool(form, "test_restore_print_wait")
     confirm_import = _form_bool(form, "confirm_import") or form.get("import_mode", "execute") == "execute"
     slow_mo_ms = _form_int(form, "slow_mo_ms", 150)
     preview_limit = _form_int(form, "preview_limit", 30)
 
     prepare_result = None
+    restore_result = None
     b2_import_result = None
     current_result = None
 
@@ -1582,6 +1920,21 @@ async def yamato_run_selected(request: Request):
             )
             current_result = prepare_result.conversion
 
+            # テストモード: 納品書PDF取得で「印刷済み」へ進んだ伝票を、開発済みの
+            # 「納品書印刷待ちへ復旧」でまとめて戻す。B2取込の前に戻すことで、
+            # 後続が失敗してもNEステータスは復旧済みの状態を保つ。
+            invoice = prepare_result.invoice
+            if test_restore_print_wait and invoice is not None and invoice.executed:
+                restore_orders = _yamato_restore_order_numbers_from_prepare_result(prepare_result)
+                if restore_orders:
+                    restore_result = await run_in_threadpool(
+                        restore_next_engine_print_wait_batch_sync,
+                        restore_orders,
+                        execute=True,
+                        headless=not headed,
+                        slow_mo_ms=slow_mo_ms,
+                    )
+
         if selected["b2_login"] or selected["b2_import"]:
             b2_import_result = await import_yamato_b2_csv(
                 csv_file=Path(csv_file_raw) if csv_file_raw else None,
@@ -1601,11 +1954,21 @@ async def yamato_run_selected(request: Request):
         message = "選択した処理を実行しました。"
         if selected["b2_import"] and not confirm_import:
             message += " B2インポートは確認なしのためCSV選択までです。"
+        if restore_result is not None:
+            failed_orders = list(restore_result.failed_order_numbers)
+            if failed_orders:
+                message += (
+                    " テストモード: 印刷待ちへ復旧できなかった伝票があります"
+                    f"（{', '.join(failed_orders)}）。『その他の操作・納品書印刷待ちへ復旧』で手動復旧してください。"
+                )
+            else:
+                message += f" テストモード: {len(restore_result.order_numbers)}件を印刷待ちへ復旧しました。"
 
         return _yamato_response(
             request,
             result=current_result,
             prepare_result=prepare_result,
+            restore_result=restore_result,
             b2_import_result=b2_import_result,
             message=message,
         )
@@ -1615,12 +1978,19 @@ async def yamato_run_selected(request: Request):
                 current_result = preview_ne_to_yamato_conversion(preview_limit=30)
             except Exception:
                 pass
+        # 途中で止まった場合、印刷済みへ進んだ伝票番号をエラー表示へ必ず明示する
+        # （prepare 内の失敗は例外メッセージ側に明示済み。ここは B2 等の後段失敗を補う）。
+        error_text = str(exc)
+        printed_notice = _yamato_printed_orders_notice(prepare_result, restore_result)
+        if printed_notice and printed_notice not in error_text:
+            error_text = f"{error_text} {printed_notice}"
         return _yamato_response(
             request,
             result=current_result,
             prepare_result=prepare_result,
+            restore_result=restore_result,
             b2_import_result=b2_import_result,
-            error=str(exc),
+            error=error_text,
             status_code=500,
         )
 
@@ -1636,6 +2006,7 @@ async def yamato_run_selected_start(request: Request):
     csv_file_raw = form.get("csv_file", "").strip()
     headed = _form_headed(form)
     verify_invoice_statuses = _form_bool(form, "verify_invoice_statuses")
+    test_restore_print_wait = _form_bool(form, "test_restore_print_wait")
     confirm_import = _form_bool(form, "confirm_import") or form.get("import_mode", "execute") == "execute"
     slow_mo_ms = _form_int(form, "slow_mo_ms", 150)
     preview_limit = _form_int(form, "preview_limit", 30)
@@ -1657,6 +2028,7 @@ async def yamato_run_selected_start(request: Request):
     do_b2 = selected["b2_login"] or selected["b2_import"]
 
     steps: list[tuple[str, str]] = []
+    do_restore = test_restore_print_wait and should_prepare and selected["ne_invoice_download"]
     if should_prepare:
         # 「どこで止まったか」を分かりやすくするため、受注取得を工程ごとに分割表示する。
         steps.extend(
@@ -1667,11 +2039,15 @@ async def yamato_run_selected_start(request: Request):
                 ("conversion", "住所補正・B2取込CSV作成"),
             ]
         )
+    if do_restore:
+        steps.append(("restore", "印刷待ちへ復旧（テストモード）"))
     if do_b2:
         steps.append(("b2_import", "ヤマトB2へ取込"))
 
     def worker(job_id: str) -> None:
         current_result = None
+        prepare_result = None
+        restore_result = None
         if should_prepare:
             # prepare が各工程の running/completed/failed を progress で報告する
             # → 失敗した工程だけが赤くなり、どこで止まったかが一目で分かる。
@@ -1699,6 +2075,53 @@ async def yamato_run_selected_start(request: Request):
             )
             current_result = prepare_result.conversion
 
+            # テストモード: 納品書PDF取得で「印刷済み」へ進んだ伝票を、開発済みの
+            # 「納品書印刷待ちへ復旧」でまとめて戻す。B2取込の前に戻すことで、
+            # 後続が失敗してもNEステータスは復旧済みの状態を保つ。
+            if do_restore:
+                invoice = prepare_result.invoice
+                restore_orders = _yamato_restore_order_numbers_from_prepare_result(prepare_result)
+                if invoice is None or not invoice.executed or not restore_orders:
+                    progress_jobs.update_step(job_id, "restore", status="completed", detail="対象なし")
+                else:
+                    progress_jobs.update_step(job_id, "restore", status="running")
+                    try:
+                        restore_result = restore_next_engine_print_wait_batch_sync(
+                            restore_orders,
+                            execute=True,
+                            headless=not headed,
+                            slow_mo_ms=slow_mo_ms,
+                        )
+                    except Exception as exc:
+                        # 復旧に失敗すると本番ステータスが「印刷済み」のまま残るため、
+                        # 必ず気付けるようジョブを失敗させ、手動復旧に必要な伝票番号を残す。
+                        progress_jobs.update_step(job_id, "restore", status="failed")
+                        progress_jobs.fail(
+                            job_id,
+                            "印刷待ちへの復旧でエラーが発生しました。"
+                            "『その他の操作・納品書印刷待ちへ復旧』で次の伝票を手動復旧してください: "
+                            f"{', '.join(restore_orders)} / エラー: {exc}",
+                        )
+                        return
+                    failed_orders = list(restore_result.failed_order_numbers)
+                    if failed_orders:
+                        progress_jobs.update_step(
+                            job_id, "restore", status="failed", detail=f"復旧失敗 {len(failed_orders)}件"
+                        )
+                        progress_jobs.fail(
+                            job_id,
+                            "一部の伝票を印刷待ちへ復旧できませんでした。"
+                            "『その他の操作・納品書印刷待ちへ復旧』で手動復旧してください: "
+                            f"{', '.join(failed_orders)}",
+                        )
+                        return
+                    progress_jobs.update_step(
+                        job_id,
+                        "restore",
+                        status="completed",
+                        detail=f"{len(restore_orders)}件を印刷待ちへ戻しました",
+                    )
+
         b2_result = None
         if do_b2:
             progress_jobs.update_step(job_id, "b2_import", status="running")
@@ -1714,8 +2137,12 @@ async def yamato_run_selected_start(request: Request):
                     slow_mo_ms=slow_mo_ms,
                     keep_browser_open=headed,
                 )
-            except Exception:
+            except Exception as exc:
                 progress_jobs.update_step(job_id, "b2_import", status="failed")
+                # ここで止まった場合も、印刷済みへ進んだ伝票番号を失敗メッセージへ必ず明示する。
+                printed_notice = _yamato_printed_orders_notice(prepare_result, restore_result)
+                if printed_notice:
+                    raise RuntimeError(f"{exc} {printed_notice}") from exc
                 raise
 
             # B2の実取込が要求された(execute想定)のに完了していなければ、ジョブを失敗扱いにして理由を表示する。
@@ -1730,6 +2157,9 @@ async def yamato_run_selected_start(request: Request):
                 parts = [f"B2取込が完了しませんでした（理由: {b2_skip or '不明'}）。"]
                 if current_result is not None and getattr(current_result, "output_csv", None):
                     parts.append("NEデータ取得・CSV作成は完了しています（/yamato で確認・再取込できます）。")
+                printed_notice = _yamato_printed_orders_notice(prepare_result, restore_result)
+                if printed_notice:
+                    parts.append(printed_notice)
                 if b2_page:
                     parts.append(f"B2画面: {b2_page}")
                 if b2_warnings:
@@ -1741,11 +2171,15 @@ async def yamato_run_selected_start(request: Request):
         message = "選択した処理を実行しました。"
         if selected["b2_import"] and not confirm_import:
             message += " B2インポートは確認なしのためCSV選択までです。"
+        if restore_result is not None:
+            message += f" テストモード: {len(restore_result.order_numbers)}件を印刷待ちへ復旧しました。"
 
         result_summary: dict[str, object] = {}
         if current_result is not None:
             result_summary["output_csv"] = _path_text(getattr(current_result, "output_csv", None))
             result_summary["output_rows"] = getattr(current_result, "output_rows", None)
+        if restore_result is not None:
+            result_summary["print_wait_restored"] = len(restore_result.order_numbers)
         if b2_result is not None:
             result_summary["b2_import_executed"] = bool(getattr(b2_result, "import_executed", False))
             result_summary["b2_skipped_reason"] = getattr(b2_result, "skipped_reason", None)
@@ -1760,6 +2194,7 @@ async def yamato_run_selected_start(request: Request):
             "headed": headed,
             "slow_mo_ms": slow_mo_ms,
             "confirm_import": confirm_import,
+            "test_restore_print_wait": test_restore_print_wait,
         },
     )
     return {"job_id": job_id}
@@ -1979,6 +2414,145 @@ async def yamato_b2_open(request: Request):
             await run_in_threadpool(b2_chrome.launch, csv_path=Path(csv_path), enable_cdp=False)
         except Exception:
             pass
+    return RedirectResponse(url="/yamato", status_code=303)
+
+
+@app.post("/yamato/run-full/start")
+async def yamato_run_full_start(request: Request):
+    # 「CSV作成からB2取込まで一括実行」: prepare（NE取得〜B2取込CSV作成）と
+    # 実ChromeでのB2取込（b2-open の automate 相当）を 1 ジョブで続けて実行する。
+    form = await _read_form(request)
+    headed = _form_headed(form)
+    slow_mo_ms = _form_int(form, "slow_mo_ms", 150)
+    preview_limit = _form_int(form, "preview_limit", 30)
+
+    steps: list[tuple[str, str]] = [
+        ("ne_fetch", "NEデータ取得"),
+        ("invoice", "納品書PDF取得"),
+        ("custom", "配送情報CSV取得"),
+        ("conversion", "住所補正・B2取込CSV作成"),
+        ("b2_open", "B2ブラウザを開く"),
+        ("b2_import", "B2へ自動で取込"),
+    ]
+
+    def worker(job_id: str) -> None:
+        def _prep_progress(key: str, status: str, detail: str | None = None) -> None:
+            if progress_jobs.is_cancel_requested(job_id):
+                raise JobCancelled()
+            progress_jobs.update_step(job_id, key, status=status, detail=detail)
+
+        prepare_result = prepare_yamato_b2_sync(
+            fetch_next_engine=True,
+            execute_downloads=True,
+            check_invoices=True,
+            execute_invoices=True,
+            verify_invoice_statuses=False,
+            check_custom_shipping=True,
+            execute_custom_shipping=True,
+            custom_shipping_order_numbers=tuple(),
+            write_conversion=True,
+            output_type="D_ALL",
+            headed=headed,
+            slow_mo_ms=slow_mo_ms,
+            preview_limit=preview_limit,
+            progress=_prep_progress,
+        )
+        conversion = prepare_result.conversion
+        printed_notice = _yamato_printed_orders_notice(prepare_result, None)
+
+        # 新しく作成されたCSVのみをB2へ渡す（古いCSVへのフォールバックは事故のもとなので行わない）。
+        output_csv = getattr(conversion, "output_csv", None)
+        if not output_csv or not Path(output_csv).is_file():
+            progress_jobs.update_step(job_id, "b2_open", status="failed", detail="CSV未作成")
+            parts = ["B2取込CSVが作成されなかったため、B2取込を中止しました。"]
+            if prepare_result.consistency_warnings:
+                parts.append("警告: " + " / ".join(prepare_result.consistency_warnings[:3]))
+            if printed_notice:
+                parts.append(printed_notice)
+            progress_jobs.fail(job_id, " ".join(parts))
+            return
+
+        progress_jobs.update_step(job_id, "b2_open", status="running")
+        try:
+            state = b2_chrome.launch(csv_path=Path(output_csv), enable_cdp=True)
+        except Exception as exc:
+            progress_jobs.update_step(job_id, "b2_open", status="failed")
+            if printed_notice:
+                raise RuntimeError(f"{exc} {printed_notice}") from exc
+            raise
+        progress_jobs.update_step(job_id, "b2_open", status="completed")
+
+        progress_jobs.update_step(job_id, "b2_import", status="running")
+        endpoint = state.get("cdp_endpoint")
+        if not _wait_for_cdp(endpoint):
+            progress_jobs.update_step(job_id, "b2_import", status="failed", detail="cdp_not_ready")
+            progress_jobs.finish(
+                job_id,
+                message=(
+                    "CSV作成は完了しましたが、自動化に接続できませんでした。"
+                    "開いているB2ブラウザで手動で取込・印刷してください。"
+                ),
+                result={"mode": "auto_failed", "reason": "cdp_not_ready"},
+            )
+            return
+        try:
+            outcome = run_b2_import_over_cdp_sync(
+                endpoint,
+                csv_file=Path(output_csv),
+                execute_import=True,
+                confirm_import=True,
+            )
+        except Exception as exc:
+            # 自動化が落ちても実Chromeは開いたまま＝手動で継続できる。
+            progress_jobs.update_step(job_id, "b2_import", status="failed", detail=str(exc))
+            progress_jobs.finish(
+                job_id,
+                message=(
+                    "CSV作成は完了しましたが、自動取込は失敗しました。"
+                    "開いているB2ブラウザで手動で取込・印刷してください。"
+                ),
+                result={"mode": "auto_failed", "error": str(exc)},
+            )
+            return
+
+        if outcome.get("import_executed"):
+            progress_jobs.update_step(job_id, "b2_import", status="completed")
+            progress_jobs.finish(
+                job_id,
+                message="CSV作成からB2取込まで自動で完了しました。開いているブラウザで印刷してください。",
+                result={
+                    "mode": "auto",
+                    "output_csv": _path_text(output_csv),
+                    "output_rows": getattr(conversion, "output_rows", None),
+                    **_b2_outcome_summary(outcome),
+                },
+            )
+        else:
+            reason = outcome.get("skipped_reason")
+            progress_jobs.update_step(job_id, "b2_import", status="failed", detail=reason)
+            progress_jobs.finish(
+                job_id,
+                message=(
+                    f"CSV作成は完了しましたが、自動取込は完了しませんでした（{reason or '理由不明'}）。"
+                    "開いているB2ブラウザで手動で取込・印刷してください。"
+                ),
+                result={"mode": "auto_incomplete", **_b2_outcome_summary(outcome)},
+            )
+
+    job_id = progress_jobs.start(
+        title="ヤマト伝票 一括実行",
+        steps=steps,
+        worker=worker,
+        workflow="yamato_run_full",
+        metadata={"headed": headed, "slow_mo_ms": slow_mo_ms},
+    )
+    return {"job_id": job_id}
+
+
+@app.post("/yamato/run-full", response_class=HTMLResponse)
+async def yamato_run_full(request: Request):
+    # JS無効時のフォールバック: 同じ一括ジョブを開始して /yamato へ戻る（進捗は /jobs で確認できる）。
+    await yamato_run_full_start(request)
     return RedirectResponse(url="/yamato", status_code=303)
 
 

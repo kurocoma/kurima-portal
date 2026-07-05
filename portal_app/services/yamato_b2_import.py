@@ -46,6 +46,8 @@ HEADLESS_ENV = "YAMATO_B2_HEADLESS"
 
 # --- メンバーズ ログインフォームの実セレクタ（実機DOMダンプで確定） -----------------
 # 証拠: logs/next_engine_yamato/b2_import_debug/20260628_220820_check_login.html
+# 再確認: 2026-07-04 実機 (20260704_081030_evidence_stuck_tab1.html) でも同一構造
+#         （#code1 / CSTMR_PSWD / a.login onclick="func_request_Link('LOGIN')"）を確認。フォーム変更なし。
 #   お客様コード(12桁) : <input type="text" name="username"      id="code1"  maxlength="12">
 #   分類コード(3桁・任意): <input type="text" name="CSTMR_CLS_CD"  id="code2"  maxlength="3">
 #   個人ID(任意)        : <input type="text" name="KOJIN"         id="kojin"  maxlength="20">
@@ -584,6 +586,15 @@ async def _capture_b2_debug_state(page, step: str, *, warnings: list[str]) -> di
 async def _login_to_b2(
     page, *, login_id: str, password: str, warnings: list[str], skip_initial_goto: bool = False
 ) -> None:
+    # 空クレデンシャルのままフォーム送信すると「お客様コードが入力されていません。／
+    # パスワードが入力されていません。」で停止する（実機 2026-07-04 の停止画像と同一症状）。
+    # 送信前に明確なエラーで中断し、空送信経路を塞ぐ。
+    if not login_id or not password:
+        raise B2LoginError(
+            "still_on_login",
+            f"B2ログイン: {LOGIN_ID_ENV} / {PASSWORD_ENV} が未設定です。"
+            "portal_tool/.env に設定してください（.env.example 参照）。",
+        )
     if not skip_initial_goto:
         await page.goto(_yamato_b2_url(), wait_until="domcontentloaded", timeout=60000)
         await page.wait_for_timeout(1000)
@@ -592,6 +603,20 @@ async def _login_to_b2(
     await _dismiss_b2_interstitials(page, warnings=warnings)
     if _is_b2_system_error_url(page.url):
         warnings.append("B2の入口URLがシステムエラー画面だったため、ログイン入口へ切り替えました。")
+        await page.goto(DEFAULT_YAMATO_B2_MEMBER_LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_timeout(1000)
+        await _dismiss_b2_interstitials(page, warnings=warnings)
+
+    # メンバーズ側【システムエラー】(HMPMNU0005 等) への着地を検出したら、エラー画面の案内どおり
+    # ログイン画面へ入り直して再ログインする。前回実行の bmypagesession cookie が残った専用
+    # プロファイル(data/b2_chrome_profile)では入口遷移がこの画面に落ち、下の冪等チェックが
+    # cookie を根拠に logged_in と誤検知して資格情報を入力せず進んでいた（今回の停止の根本原因。
+    # 証拠: 20260704_081030_evidence_stuck_tab0.html）。
+    if await _is_b2_members_system_error_page(page):
+        warnings.append(
+            "B2メンバーズの【システムエラー】画面を検出（前回セッションの残留が原因）。"
+            "ログイン画面へ入り直して再ログインします。"
+        )
         await page.goto(DEFAULT_YAMATO_B2_MEMBER_LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
         await page.wait_for_timeout(1000)
         await _dismiss_b2_interstitials(page, warnings=warnings)
@@ -809,6 +834,12 @@ async def _classify_b2_login_result(page) -> str:
     if _is_b2_system_error_url(url):
         return "system_error"
 
+    # メンバーズ側【システムエラー】画面は、残留 bmypagesession cookie があっても未認証として扱う
+    # （判定の厳格化。cookie だけを根拠に logged_in を返す誤検知の防止。
+    # 証拠: 20260704_081030_evidence_stuck_tab0.html — cookie ありでも操作不能なエラー画面）。
+    if await _is_b2_members_system_error_page(page):
+        return "system_error"
+
     text = await _page_body_text(page)
     if _text_has_time_outside(text):
         return "time_outside"
@@ -840,6 +871,28 @@ async def _is_b2_member_login_page(page) -> bool:
         return await page.locator("input#code1, input[name='CSTMR_PSWD']").first.is_visible(
             timeout=1000
         )
+    except Exception:
+        return False
+
+
+async def _is_b2_members_system_error_page(page) -> bool:
+    """メンバーズ側(bmypage)の【システムエラー】画面かを返す。
+
+    証拠: logs/next_engine_yamato/b2_import_debug/20260704_081030_evidence_stuck_tab0.html
+    （HMPMNU0005JspServlet。本文が【システムエラー】＋「再度ログインいただき、ご利用ください。」で、
+    ログインフォーム(#code1)も認証済みマーカーも無い。前回実行の bmypagesession cookie が
+    プロファイルに残っていると入口遷移がこの画面に落ち、cookie 由来の logged_in 判定が誤検知する）。
+    newb2web 側の system_error.html は `_is_b2_system_error_url` が URL で判定するため対象外。
+    """
+    if "bmypage.kuronekoyamato.co.jp" not in (page.url or ""):
+        return False
+    text = await _page_body_text(page)
+    if "システムエラー" not in text:
+        return False
+    if "再度ログイン" in text:
+        return True
+    try:
+        return await page.locator("a[href*='func_request_err']").count() > 0
     except Exception:
         return False
 
@@ -980,6 +1033,22 @@ async def _open_import_page(page, *, login_id: str, password: str, warnings: lis
         page, ok = await _enter_and_locate_import_page(page, warnings=warnings)
         if ok:
             return page, True
+
+    # メンバーズ側【システムエラー】に落ちている場合は、画面の案内どおり再ログインしてから
+    # もう一度だけ取込画面遷移を試す（証拠: 20260704_081030_evidence_stuck_tab0.html。
+    # この画面にはメニューが無く、再ログイン以外に自動で抜ける導線が無い）。
+    if await _is_b2_members_system_error_page(page):
+        warnings.append(
+            "B2メンバーズの【システムエラー】画面を検出。再ログインしてから取込画面へ再遷移します。"
+        )
+        try:
+            await _login_to_b2(page, login_id=login_id, password=password, warnings=warnings)
+        except B2LoginError as exc:
+            warnings.append(str(exc))
+        else:
+            page, ok = await _enter_and_locate_import_page(page, warnings=warnings)
+            if ok:
+                return page, True
 
     warnings.append("B2取込画面への遷移候補をクリックできませんでした。保存HTMLでセレクタ確認が必要です。")
     return page, False
@@ -1890,6 +1959,13 @@ async def run_b2_import_over_cdp(
         try:
             if login_id and password:
                 await _login_to_b2(page, login_id=login_id, password=password, warnings=warnings)
+            else:
+                # 資格情報なしでも実Chromeは開いたまま＝手動ログインのフォールバックは残すが、
+                # 「なぜ自動ログインされないか」を warnings で明示する（無言スキップの禁止）。
+                warnings.append(
+                    f"{LOGIN_ID_ENV} / {PASSWORD_ENV} が未設定のため自動ログインをスキップしました。"
+                    "開いているブラウザで手動ログインするか、portal_tool/.env に設定してください。"
+                )
             page, ready_to_import = await _open_import_page(
                 page, login_id=login_id, password=password, warnings=warnings
             )

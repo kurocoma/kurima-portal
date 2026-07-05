@@ -118,7 +118,7 @@ New-NetFirewallRule -DisplayName "kurima-portal" -Direction Inbound -Action Allo
 - **「保存先を自動検出できませんでした」** — SharePoint ライブラリの同期を確認するか、`.env` に `KURIMA_PORTAL_ROOT` を設定。`uv run python scripts/doctor.py` で候補パスを確認できます。
 - **ブラウザが起動しない / NotImplementedError** — `uv run playwright install chromium` を実行。Chrome/Edge がインストール済みなら自動検出されます。
 - **ジョブが失敗した** — `/jobs` の該当行から「詳細ログ」を開くか、`/logs` で `execution_runs/` 配下の events.jsonl を確認。
-- **.py を変更したのに反映されない** — uvicorn は `--reload` なしだと自動反映されません。サーバーを再起動してください。
+- **.py を変更したのに反映されない** — uvicorn は `--reload` なしだと自動反映されません。`.\scripts\restart.bat` で再起動してください（既存プロセスの停止→新しいウィンドウで起動まで自動。`restart.bat 8010` でポート指定、`restart.bat 8006 lan` で LAN 公開モード）。
 - **他のPCから繋がらない** — ホストPCのファイアウォール受信許可（上記）と、`-Mode lan` で起動しているか（`0.0.0.0` で LISTEN しているか）を確認。
 
 ## CLI リファレンス

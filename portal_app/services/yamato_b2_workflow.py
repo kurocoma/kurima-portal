@@ -69,8 +69,11 @@ def _emit(progress, key: str, status: str, detail: str | None = None) -> None:
         pass
 
 
-async def _tracked_step(progress, key: str, label: str, coro):
-    """工程を running→completed で進捗報告しつつ実行。失敗時は failed 報告＋工程名付きで再送出。"""
+async def _tracked_step(progress, key: str, label: str, coro, *, done_detail=None):
+    """工程を running→completed で進捗報告しつつ実行。失敗時は failed 報告＋工程名付きで再送出。
+
+    done_detail(result) を渡すと、完了報告の detail にその戻り値（str | None）を表示する。
+    """
     _emit(progress, key, "running")
     try:
         result = await coro
@@ -78,8 +81,42 @@ async def _tracked_step(progress, key: str, label: str, coro):
         message = str(exc).strip() or type(exc).__name__
         _emit(progress, key, "failed", message[:140])
         raise RuntimeError(f"{label}でエラー: {message}") from exc
-    _emit(progress, key, "completed")
+    detail = None
+    if done_detail is not None:
+        try:
+            detail = done_detail(result)
+        except Exception:
+            detail = None
+    _emit(progress, key, "completed", detail)
     return result
+
+
+def _printed_orders_text(invoice: InvoiceBatchDownloadResult | None) -> str | None:
+    """納品書PDF一括DLで「印刷済み」へ進んだ伝票番号の一覧テキスト（該当なしなら None）。"""
+    if invoice is None or not invoice.executed or not invoice.downloaded_file:
+        return None
+    orders = invoice.before_list.order_numbers
+    if not orders:
+        return None
+    return ", ".join(orders)
+
+
+def _printed_step_detail(invoice: InvoiceBatchDownloadResult | None) -> str | None:
+    """納品書PDF取得ステップの完了 detail。ジョブが後段で止まっても、
+    どの伝票が印刷済みへ進んだかを進捗ステップ上で常に確認できるようにする。"""
+    text = _printed_orders_text(invoice)
+    return f"印刷済みへ変更: {text}" if text else None
+
+
+def _printed_orders_notice(invoice: InvoiceBatchDownloadResult | None) -> str:
+    """後段の工程が失敗したとき、エラー文へ添える「印刷済みへ進んだ伝票」の明示（該当なしなら空文字）。"""
+    text = _printed_orders_text(invoice)
+    if not text:
+        return ""
+    return (
+        f"※納品書印刷で「印刷済み」へ変更済みの伝票: {text}"
+        "（『その他の操作・納品書印刷待ちへ復旧』で戻せます）"
+    )
 
 
 def prepare_yamato_b2_sync(
@@ -148,6 +185,11 @@ def prepare_yamato_b2_sync(
         )
     except Exception as exc:
         _emit(progress, "conversion", "failed", (str(exc).strip() or type(exc).__name__)[:140])
+        # ここで止まると納品書PDF取得で進んだ「印刷済み」が残るため、
+        # どの伝票が変更済みかをエラー文に必ず明示する。
+        notice = _printed_orders_notice(invoice)
+        if notice:
+            raise RuntimeError(f"{exc} {notice}") from exc
         raise
     _emit(progress, "conversion", "completed")
     return result
@@ -241,7 +283,7 @@ def _run_downloads_legacy(
         except Exception as exc:
             _emit(progress, "invoice", "failed", (str(exc).strip() or type(exc).__name__)[:140])
             raise
-        _emit(progress, "invoice", "completed")
+        _emit(progress, "invoice", "completed", _printed_step_detail(invoice))
     else:
         _emit(progress, "invoice", "completed", "スキップ")
 
@@ -265,6 +307,11 @@ def _run_downloads_legacy(
             )
         except Exception as exc:
             _emit(progress, "custom", "failed", (str(exc).strip() or type(exc).__name__)[:140])
+            # ここで止まると納品書PDF取得で進んだ「印刷済み」が残るため、
+            # どの伝票が変更済みかをエラー文に必ず明示する。
+            notice = _printed_orders_notice(invoice)
+            if notice:
+                raise RuntimeError(f"{exc} {notice}") from exc
             raise
         _emit(progress, "custom", "completed")
     else:
@@ -343,6 +390,7 @@ async def _run_downloads_shared(
                     slow_mo_ms=slow_mo_ms,
                     client=client,
                 ),
+                done_detail=_printed_step_detail,
             )
         else:
             _emit(progress, "invoice", "completed", "スキップ")
@@ -358,15 +406,23 @@ async def _run_downloads_shared(
         if warning:
             workflow_warnings.append(warning)
         if do_custom:
-            custom_shipping = await _tracked_step(
-                progress,
-                "custom",
-                "配送情報CSV取得(NE)",
-                client.download_custom_shipping_data(
-                    execute=execute_custom_shipping,
-                    order_numbers_filter=effective,
-                ),
-            )
+            try:
+                custom_shipping = await _tracked_step(
+                    progress,
+                    "custom",
+                    "配送情報CSV取得(NE)",
+                    client.download_custom_shipping_data(
+                        execute=execute_custom_shipping,
+                        order_numbers_filter=effective,
+                    ),
+                )
+            except Exception as exc:
+                # ここで止まると納品書PDF取得で進んだ「印刷済み」が残るため、
+                # どの伝票が変更済みかをエラー文に必ず明示する。
+                notice = _printed_orders_notice(invoice)
+                if notice:
+                    raise RuntimeError(f"{exc} {notice}") from exc
+                raise
         else:
             _emit(progress, "custom", "completed", "スキップ" if not warning else warning)
 
