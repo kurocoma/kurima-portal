@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}設定 - くりまポータルツール{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1 class="page-title">設定</h1>
+  <p class="page-lead">
+    このサーバーが認識している設定（.env / 環境変数）と、パス解決の結果を表示します（閲覧のみ）。
+    パスワード等の秘密は先頭2文字だけ表示します。変更は ホストPC の <span class="mono">.env</span> を編集し、
+    <span class="mono">scripts\restart.bat</span> で再起動すると反映されます。
+  </p>
+</div>
+
+<section class="panel">
+  <h2 class="panel-title">いまの稼働状態</h2>
+  <dl class="kv narrow">
+    <dt>稼働版 / 起動</dt>
+    <dd><span class="mono">{{ runtime.version }}</span> ・ {{ runtime.started_at }}（詳細は <a class="text-link" href="/health">/health</a>）</dd>
+    <dt>実行ログ・エラーログの出力先</dt>
+    <dd class="mono" style="word-break:break-all;">{{ runtime.log_dir }}</dd>
+    <dt>ログファイル名（このPC）</dt>
+    <dd class="mono">{{ runtime.run_log_name }} / {{ runtime.error_log_name }}</dd>
+    <dt>ブラウザ操作タイムアウト（実効値）</dt>
+    <dd>画面遷移 {{ runtime.nav_timeout_ms }} ms ・ ダウンロード {{ runtime.download_timeout_ms }} ms（未設定時はサイト別の既定）</dd>
+    <dt>アクセス許可（LAN公開時）</dt>
+    <dd class="mono">{{ runtime.allowed_clients }}</dd>
+  </dl>
+</section>
+
+<section class="panel mt-14">
+  <h2 class="panel-title">保存先パスの解決結果</h2>
+  {% if resolution.ok %}
+    <dl class="kv narrow">
+      <dt>ポータルルート</dt>
+      <dd class="mono" style="word-break:break-all;">{{ resolution.portal_root }}</dd>
+      <dt>商品管理シート</dt>
+      <dd class="mono" style="word-break:break-all;">{{ resolution.master_book }}</dd>
+      <dt>受注明細フォルダ</dt>
+      <dd class="mono" style="word-break:break-all;">{{ resolution.order_csv_dir }}</dd>
+    </dl>
+  {% else %}
+    <div class="note error">
+      <div class="note-title">保存先を自動検出できませんでした</div>
+      <p>{{ resolution.error }}</p>
+      <p class="adv-note">確認した候補:</p>
+      <ul class="note-list">
+        {% for candidate in resolution.candidates %}<li class="mono">{{ candidate }}</li>{% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+</section>
+
+{% for group in groups %}
+<section class="panel mt-14">
+  <h2 class="panel-title">{{ group.name }}</h2>
+  <div class="tbl-scroll">
+    <table class="tbl tbl-min-680">
+      <thead>
+        <tr>
+          <th>設定キー</th>
+          <th>状態</th>
+          <th>値</th>
+          <th>用途</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in group['items'] %}
+        <tr>
+          <td class="mono">{{ item.key }}</td>
+          <td>
+            {% if item.is_set %}
+              <span class="tag-ok">設定済み</span>
+            {% else %}
+              <span style="color:var(--muted-3);font-size:12px;">未設定</span>
+            {% endif %}
+          </td>
+          <td class="mono" style="word-break:break-all;">{{ item.display }}</td>
+          <td style="font-size:12px;color:var(--text-2);">{{ item.purpose }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endfor %}
+
+<p class="adv-note mt-14">
+  未設定のキーは既定値（自動探索）で動作します。全キーの用途は README の「環境変数」表を参照してください。
+</p>
+{% endblock %}

@@ -21,14 +21,24 @@
           <a class="appnav-link {% if nav_path.startswith('/yamato') %}is-active{% endif %}" href="/yamato">ヤマト伝票</a>
           <a class="appnav-link {% if nav_path.startswith('/clickpost') %}is-active{% endif %}" href="/clickpost">クリックポスト</a>
           <a class="appnav-link {% if nav_path.startswith('/shipment-confirmation') %}is-active{% endif %}" href="/shipment-confirmation">出荷確定</a>
-          <a class="appnav-link {% if nav_path.startswith('/jobs') %}is-active{% endif %}" href="/jobs">実行履歴</a>
+          <a class="appnav-link {% if nav_path.startswith('/jobs') %}is-active{% endif %}" href="/jobs">実行履歴<span id="nav-running-badge" class="nav-badge" title="実行中のジョブ" hidden></span></a>
           <a class="appnav-link {% if nav_path.startswith('/logs') %}is-active{% endif %}" href="/logs">ログ</a>
+          <a class="appnav-link {% if nav_path.startswith('/settings') %}is-active{% endif %}" href="/settings">設定</a>
         </nav>
       </div>
     </header>
     <main class="page">
       {% block content %}{% endblock %}
     </main>
+    <footer class="appfoot">
+      <!-- 稼働バージョンの可視化（S4）: 「更新したのに直らない」＝再起動忘れの切り分け用 -->
+      <span class="mono">稼働版 {{ app_version }}</span>
+      <span class="appfoot-sep" aria-hidden="true">・</span>
+      <span>起動 {{ app_started_at }}</span>
+    </footer>
+    <!-- 共通進捗スクリプト（U7/U4）: ページ側の window.KURIMA_PROGRESS 定義（content ブロック内）より
+         後に読み込む必要があるため、body 末尾に置く。全ページでナビの実行中バッジも担当する。 -->
+    <script src="{{ url_for('static', path='/progress.js') }}"></script>
     <script>
       // 遅延ロード: [data-lazy] のスロットを、その data-lazy URL から取得したHTMLで置き換える。
       // 重い結果セクション（プレビュー）を別エンドポイントから非同期に読み込むために使う。

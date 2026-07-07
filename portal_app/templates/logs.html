@@ -4,7 +4,8 @@
 <div class="page-head">
   <h1 class="page-title">ログ一覧</h1>
   <p class="page-lead">
-    logs フォルダのファイルを更新が新しい順に表示します（最新200件 / 全{{ total_count }}件）。
+    logs フォルダと共有ログ（SharePoint 側の portal-run / portal-error）を
+    更新が新しい順に表示します（最新200件 / 全{{ total_count }}件）。
     エラー・デバッグ出力の調査はここから始めてください。
   </p>
 </div>
@@ -15,6 +16,7 @@
       <thead>
         <tr>
           <th>更新日時</th>
+          <th>場所</th>
           <th>ファイル</th>
           <th class="num">サイズ</th>
           <th>表示</th>
@@ -25,6 +27,7 @@
           {% for entry in entries %}
           <tr>
             <td class="mono">{{ entry.updated_at }}</td>
+            <td>{{ entry.scope }}</td>
             <td class="mono" style="word-break:break-all;">{{ entry.rel }}</td>
             <td class="num">{{ "{:,}".format(entry.size) }} B</td>
             <td>
@@ -37,7 +40,7 @@
           </tr>
           {% endfor %}
         {% else %}
-          <tr><td class="empty" colspan="4">ログファイルはまだありません。</td></tr>
+          <tr><td class="empty" colspan="5">ログファイルはまだありません。</td></tr>
         {% endif %}
       </tbody>
     </table>

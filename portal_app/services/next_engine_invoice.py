@@ -31,6 +31,7 @@ from portal_app.services.next_engine_yamato import (
     _snapshot_order_list,
 )
 from portal_app.services.paths import find_portal_paths
+from portal_app.settings import download_timeout_ms, nav_timeout_ms
 
 
 ORDER_LIST_PRINT_WAIT_URL = "https://main.next-engine.com/Userjyuchu/index?search_condi=17"
@@ -386,7 +387,7 @@ async def _download_invoice_pdf(
                     await page.goto(
                         ORDER_LIST_PRINT_WAIT_URL,
                         wait_until="domcontentloaded",
-                        timeout=60000,
+                        timeout=nav_timeout_ms(),
                     )
                     await page.wait_for_selector(
                         f'input[name="qid[]"][value="{order_no}"]',
@@ -399,7 +400,7 @@ async def _download_invoice_pdf(
                     await page.wait_for_selector(INVOICE_DOWNLOAD_BUTTON_ID, timeout=30000)
                     await _set_invoice_options(page)
 
-                    async with page.expect_download(timeout=120000) as download_info:
+                    async with page.expect_download(timeout=download_timeout_ms(120000)) as download_info:
                         await page.locator(INVOICE_DOWNLOAD_BUTTON_ID).click()
                     download = await download_info.value
                     await download.save_as(str(destination))
@@ -462,7 +463,7 @@ async def _download_yamato_invoice_pdf_batch(
         await page.wait_for_selector(INVOICE_DOWNLOAD_BUTTON_ID, timeout=30000)
         await _set_invoice_options(page, mode="H")
 
-        async with page.expect_download(timeout=180000) as download_info:
+        async with page.expect_download(timeout=download_timeout_ms(180000)) as download_info:
             await page.locator(INVOICE_DOWNLOAD_BUTTON_ID).click()
         download = await download_info.value
         await download.save_as(str(destination))
@@ -508,7 +509,7 @@ async def _inspect_order_statuses(
                         await page.goto(
                             ORDER_INPUT_URL.format(order_no=order_no),
                             wait_until="domcontentloaded",
-                            timeout=60000,
+                            timeout=nav_timeout_ms(),
                         )
                         await page.wait_for_selector("#jyuchu_denpyo_no", timeout=30000)
                         await page.wait_for_selector("#jyuchu_jyotai_kbn", timeout=30000)

@@ -201,6 +201,7 @@
   </div>
   <ol id="progress-steps" class="progress-steps"></ol>
   <p id="progress-error" class="progress-error" hidden></p>
+  <p id="progress-hint" class="progress-hint" hidden></p>
   <div id="progress-result"></div>
 </div>
 
@@ -614,23 +615,11 @@
     }
   });
 
-  // --- 進捗ジョブ（既存 /progress ポーリングと同じ流儀） ---
-  const panel = document.getElementById("progress-panel");
-  const title = document.getElementById("progress-title");
-  const message = document.getElementById("progress-message");
-  const statusBadge = document.getElementById("progress-status");
-  const stepsList = document.getElementById("progress-steps");
-  const errorBox = document.getElementById("progress-error");
-  const resultBox = document.getElementById("progress-result");
-  const cancelBtn = document.getElementById("progress-cancel");
-  let currentJobId = null;
-  let currentJobKind = null;
+  // --- 進捗ジョブ（本体は共通スクリプト /static/progress.js。ここは設定とフックのみ） ---
 
-  const statusLabels = { queued: "待機中", running: "処理中", completed: "完了", failed: "エラー", cancelled: "中止" };
-  const stepLabels = { pending: "待機中", running: "処理中", completed: "完了", failed: "エラー" };
-
-  const renderResult = (job) => {
-    resultBox.innerHTML = "";
+  // 完了結果の描画（このページ固有。完了時のみ div#progress-result へ表示する）
+  const renderJobResult = (job, resultEl) => {
+    resultEl.innerHTML = "";
     if (job.status !== "completed" || !job.result) return;
     const dl = document.createElement("dl");
     dl.className = "kv mt-14";
@@ -649,77 +638,7 @@
       dd.textContent = Array.isArray(value) ? value.join(" / ") : String(value);
       dl.append(dt, dd);
     }
-    resultBox.appendChild(dl);
-  };
-
-  const render = (job) => {
-    panel.hidden = false;
-    panel.classList.toggle("ok", job.status === "completed");
-    panel.classList.toggle("error", job.status === "failed" || job.status === "cancelled");
-    panel.classList.toggle("warn", job.status === "running" || job.status === "queued");
-    const active = job.status === "running" || job.status === "queued";
-    if (cancelBtn) cancelBtn.hidden = !active;
-    title.textContent = job.title || "処理状況";
-    message.textContent = job.message || "";
-    statusBadge.textContent = statusLabels[job.status] || job.status;
-    stepsList.innerHTML = "";
-    for (const step of job.steps || []) {
-      const item = document.createElement("li");
-      item.className = "progress-step is-" + step.status;
-      const dot = document.createElement("span");
-      dot.className = "step-dot";
-      const body = document.createElement("div");
-      const label = document.createElement("strong");
-      label.textContent = step.label;
-      const detail = document.createElement("small");
-      detail.textContent = (stepLabels[step.status] || step.status) + (step.detail ? " - " + step.detail : "");
-      body.append(label, detail);
-      item.append(dot, body);
-      stepsList.appendChild(item);
-    }
-    errorBox.hidden = !job.error;
-    errorBox.textContent = job.error || "";
-    renderResult(job);
-  };
-
-  const enableButtons = () => {
-    for (const button of document.querySelectorAll("[data-progress-form] button")) button.disabled = false;
-    refreshUploadButton();
-  };
-
-  const poll = async (jobId) => {
-    const response = await fetch("/progress/" + jobId, { cache: "no-store" });
-    if (!response.ok) throw new Error("進捗を取得できませんでした。");
-    const job = await response.json();
-    render(job);
-    if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") {
-      enableButtons();
-      if (cancelBtn) { cancelBtn.hidden = true; cancelBtn.disabled = false; cancelBtn.textContent = "実行を中止"; }
-      // ヤマト発行済データ取得が成功したら、自動でマッピング再読込を行う。
-      // 取得が失敗・中止のときは再読込せず、エラーのまま止める。
-      if (currentJobKind === "fetch") {
-        currentJobKind = null;
-        if (job.status === "completed") {
-          await reloadMapping();
-        } else {
-          showToast("ヤマト発行済データ取得が完了しなかったため、マッピング再読込は行っていません。", "error");
-        }
-      }
-      return;
-    }
-    setTimeout(() => poll(jobId).catch(showError), 1000);
-  };
-
-  const showError = (error) => {
-    panel.hidden = false;
-    panel.classList.remove("ok", "warn");
-    panel.classList.add("error");
-    title.textContent = "処理状況";
-    message.textContent = "処理を開始できませんでした。";
-    statusBadge.textContent = "エラー";
-    errorBox.hidden = false;
-    errorBox.textContent = (error && error.message) || String(error);
-    enableButtons();
+    resultEl.appendChild(dl);
   };
 
   // フォーム送信前に、画面の状態（スキャン・編集済み行・設定）を hidden へ反映する。
@@ -752,52 +671,39 @@
     }
   };
 
-  for (const form of document.querySelectorAll("[data-progress-form]")) {
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const endpoint = form.dataset.progressEndpoint;
-      if (!endpoint) { form.submit(); return; }
+  window.KURIMA_PROGRESS = {
+    // このページで開始しうる workflow（リロード時の再アタッチ対象。U4）
+    workflows: [
+      "shipment_confirmation_fetch_yamato",
+      "shipment_confirmation_create",
+      "shipment_confirmation_upload",
+    ],
+    renderResult: renderJobResult,
+    // 送信前の検証と hidden 反映。文字列を返すと送信を中断してエラー表示になる。
+    beforeSubmit: (form) => {
       if (form.id === "create-form" && !rows.length && !scans.length) {
-        showError(new Error("先にバーコードをスキャンし、マッピングを実行してください。"));
-        return;
+        return "先にバーコードをスキャンし、マッピングを実行してください。";
       }
       if (form.id === "upload-form" && !confirmUpload.checked) {
-        showError(new Error("確認チェックボックスにチェックしてください。"));
-        return;
+        return "確認チェックボックスにチェックしてください。";
       }
       prepareForm(form);
-      // fetch へ FormData を渡すと multipart になりサーバーの parse_qs が読めないため、
-      // URLSearchParams で urlencoded 送信する（既存ページと同じ流儀）。
-      const body = new URLSearchParams(new FormData(form, event.submitter));
-      for (const button of document.querySelectorAll("[data-progress-form] button")) button.disabled = true;
-      render({ title: "処理状況", status: "queued", message: "ジョブを開始しています。", steps: [] });
-      try {
-        const response = await fetch(endpoint, { method: "POST", body });
-        if (!response.ok) {
-          const text = await response.text().catch(() => "");
-          throw new Error(text || "処理を開始できませんでした。");
-        }
-        const payload = await response.json();
-        currentJobId = payload.job_id;
-        currentJobKind = form.id === "fetch-yamato-form" ? "fetch" : null;
-        if (cancelBtn) { cancelBtn.hidden = false; cancelBtn.disabled = false; cancelBtn.textContent = "実行を中止"; }
-        await poll(payload.job_id);
-      } catch (error) {
-        showError(error);
+      return null;
+    },
+    jobKind: (form) => (form.id === "fetch-yamato-form" ? "fetch" : null),
+    // ヤマト発行済データ取得が成功したら、自動でマッピング再読込を行う。
+    // 取得が失敗・中止のときは再読込せず、エラーのまま止める。
+    onJobDone: async (job, kind) => {
+      if (kind !== "fetch") return;
+      if (job.status === "completed") {
+        await reloadMapping();
+      } else {
+        showToast("ヤマト発行済データ取得が完了しなかったため、マッピング再読込は行っていません。", "error");
       }
-    });
-  }
-
-  if (cancelBtn) {
-    cancelBtn.addEventListener("click", async () => {
-      if (!currentJobId) return;
-      cancelBtn.disabled = true;
-      cancelBtn.textContent = "中止しています…";
-      try {
-        await fetch("/progress/" + currentJobId + "/cancel", { method: "POST" });
-      } catch (e) { /* ポーリングが中止状態を拾う */ }
-    });
-  }
+    },
+    // ボタン再有効化後、「ネクストエンジンへ反映」はチェック状態に応じた無効化へ戻す
+    afterEnableButtons: refreshUploadButton,
+  };
 
   renderScans();
   renderPreview();

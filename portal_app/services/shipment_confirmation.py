@@ -40,6 +40,7 @@ from portal_app.services.yamato_b2_import import (
     _storage_state_path as _b2_storage_state_path,
     _yamato_b2_headless_default,
 )
+from portal_app.settings import download_timeout_ms, nav_timeout_ms
 
 
 FLOW_ID = "e020c90f-c86d-4be9-ace7-e38751e80d2f"
@@ -448,12 +449,12 @@ async def upload_next_engine_shipment_csv(
                 try:
                     page = await context.new_page()
                     await login_client._login(page)
-                    await page.goto(NEXT_ENGINE_SHIPMENT_UPLOAD_URL, wait_until="domcontentloaded", timeout=60000)
+                    await page.goto(NEXT_ENGINE_SHIPMENT_UPLOAD_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
                     await page.locator(
                         'input[type="file"][name="_n_file"], input[name="_n_file"], input#_n_file'
                     ).first.set_input_files(str(preview.upload_csv))
                     await _click_upload_button(page)
-                    await page.wait_for_load_state("domcontentloaded", timeout=60000)
+                    await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
                     await page.wait_for_timeout(1500)
                     confirmation_text = await _page_text_excerpt(page)
                     await context.storage_state(path=str(STORAGE_STATE_PATH))
@@ -727,7 +728,7 @@ async def _export_issued_data_csv(
     await page.wait_for_timeout(500)
 
     # 5) ファイル出力 → （出る場合は）「ダウンロード」ダイアログ → CSV保存
-    async with page.expect_download(timeout=90000) as download_info:
+    async with page.expect_download(timeout=download_timeout_ms(90000)) as download_info:
         await output_frame.locator("#output_file").first.click()
         for _ in range(15):
             await page.wait_for_timeout(1000)

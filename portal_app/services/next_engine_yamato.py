@@ -19,6 +19,7 @@ from portal_app.services.next_engine_downloader import (
     _next_engine_storage_lock,
 )
 from portal_app.services.paths import PortalPaths, find_portal_paths
+from portal_app.settings import download_timeout_ms, nav_timeout_ms
 
 
 ORDER_LIST_PRINT_WAIT_URL = "https://main.next-engine.com/Userjyuchu/index?search_condi=17"
@@ -420,7 +421,7 @@ class NextEngineYamatoClient:
                 ".csv",
             )
             try:
-                async with page.expect_download(timeout=90000) as download_info:
+                async with page.expect_download(timeout=download_timeout_ms(90000)) as download_info:
                     await page.locator(".bootbox.modal .modal-footer a.btn-success").click()
                 download = await download_info.value
             except PlaywrightTimeoutError:
@@ -536,13 +537,13 @@ class _FilteredOrderListSession:
 
     async def _goto_order_list(self) -> None:
         assert self.page is not None
-        await self.page.goto(ORDER_LIST_PRINT_WAIT_URL, wait_until="domcontentloaded", timeout=60000)
+        await self.page.goto(ORDER_LIST_PRINT_WAIT_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
         try:
             await self.page.wait_for_selector("#jyuchu_dlg_open", timeout=30000)
             return
         except PlaywrightTimeoutError:
             await self.client.login_client._login(self.page)
-            await self.page.goto(ORDER_LIST_PRINT_WAIT_URL, wait_until="domcontentloaded", timeout=60000)
+            await self.page.goto(ORDER_LIST_PRINT_WAIT_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
             try:
                 await self.page.wait_for_selector("#jyuchu_dlg_open", timeout=30000)
             except PlaywrightTimeoutError:
@@ -624,13 +625,13 @@ class _CustomDataDownloadSession:
 
     async def _goto_custom_data_download_page(self) -> None:
         assert self.page is not None
-        await self.page.goto(CUSTOM_DATA_DOWNLOAD_URL, wait_until="domcontentloaded", timeout=60000)
+        await self.page.goto(CUSTOM_DATA_DOWNLOAD_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
         try:
             await self.page.wait_for_selector("#tree", timeout=30000)
             return
         except PlaywrightTimeoutError:
             await self.client.login_client._login(self.page)
-            await self.page.goto(CUSTOM_DATA_DOWNLOAD_URL, wait_until="domcontentloaded", timeout=60000)
+            await self.page.goto(CUSTOM_DATA_DOWNLOAD_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
             try:
                 await self.page.wait_for_selector("#tree", timeout=30000)
                 return
@@ -791,7 +792,7 @@ async def _open_next_engine_main_from_base(page):
         try:
             if candidate.is_closed():
                 continue
-            await candidate.wait_for_load_state("domcontentloaded", timeout=60000)
+            await candidate.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
             await candidate.bring_to_front()
             return candidate
         except Exception:
@@ -835,7 +836,7 @@ async def _open_meisai_page(
     async with page.context.expect_page(timeout=60000) as new_page_info:
         await page.locator("#btn_meisai_exec").click()
     meisai_page = await new_page_info.value
-    await meisai_page.wait_for_load_state("domcontentloaded", timeout=60000)
+    await meisai_page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
     if "base.next-engine.org" in meisai_page.url:
         meisai_page = await _open_next_engine_main_from_base(meisai_page)
         if "base.next-engine.org" in meisai_page.url:
@@ -845,7 +846,7 @@ async def _open_meisai_page(
             except Exception:
                 pass
             meisai_page = await _open_next_engine_main_from_base(page)
-        await meisai_page.goto(ORDER_DETAIL_LIST_URL, wait_until="domcontentloaded", timeout=60000)
+        await meisai_page.goto(ORDER_DETAIL_LIST_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
         await meisai_page.wait_for_timeout(2500)
     meisai_page = await _wait_for_meisai_download_link(meisai_page)
     return meisai_page
@@ -862,7 +863,7 @@ async def _wait_for_meisai_download_link(page):
         if "base.next-engine.org" in page.url:
             try:
                 page = await _open_next_engine_main_from_base(page)
-                await page.goto(ORDER_DETAIL_LIST_URL, wait_until="domcontentloaded", timeout=60000)
+                await page.goto(ORDER_DETAIL_LIST_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
                 await page.wait_for_timeout(2500)
             except Exception:
                 pass
@@ -895,7 +896,7 @@ async def _download_ne_csv_from_current_page(page, destination: Path, *, debug_l
             break
 
         try:
-            async with page.expect_download(timeout=60000) as download_info:
+            async with page.expect_download(timeout=download_timeout_ms(60000)) as download_info:
                 await visible_locator.click(force=True)
             download = await download_info.value
             await download.save_as(str(destination))
@@ -946,7 +947,7 @@ async def _prepare_next_engine_download_click(page) -> None:
 
 async def _reload_next_engine_download_page(page) -> None:
     try:
-        await page.reload(wait_until="domcontentloaded", timeout=60000)
+        await page.reload(wait_until="domcontentloaded", timeout=nav_timeout_ms())
         await page.wait_for_timeout(2500)
     except Exception:
         await page.wait_for_timeout(2500)
@@ -985,7 +986,7 @@ async def _ensure_custom_delivery_pattern_visible(page) -> None:
             return
         # 展開できない → ツリーを初期状態に戻して再試行
         try:
-            await page.reload(wait_until="domcontentloaded", timeout=60000)
+            await page.reload(wait_until="domcontentloaded", timeout=nav_timeout_ms())
             await page.wait_for_selector("#tree", timeout=30000)
             await page.wait_for_timeout(1500)
         except Exception:

@@ -25,6 +25,7 @@ from playwright.async_api import (
 
 from portal_app.services.credentials import load_next_engine_credential
 from portal_app.services.paths import PortalPaths, find_portal_paths
+from portal_app.settings import download_timeout_ms, nav_timeout_ms
 
 
 LOGIN_URL = "https://base.next-engine.org/users/sign_in/"
@@ -224,7 +225,7 @@ class NextEngineOrderDetailDownloader:
         return await browser.new_context(**kwargs)
 
     async def _login(self, page: Page, *, open_main: bool = False) -> None:
-        await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
+        await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
         await page.wait_for_timeout(1500)
         await self._dismiss_cookie_banner(page)
 
@@ -233,7 +234,7 @@ class NextEngineOrderDetailDownloader:
             await login_input.fill(self.credential.login_id)
             await page.locator("#user_password").fill(self.credential.password)
             await page.locator('input[name="commit"]').click()
-            await page.wait_for_load_state("domcontentloaded", timeout=60000)
+            await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
             await page.wait_for_timeout(2000)
             await self._handle_news_page(page)
 
@@ -262,7 +263,7 @@ class NextEngineOrderDetailDownloader:
             new_page = None
         if new_page is not None and new_page is not page:
             try:
-                await new_page.wait_for_load_state("domcontentloaded", timeout=60000)
+                await new_page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
                 await new_page.wait_for_timeout(1500)
             finally:
                 try:
@@ -272,7 +273,7 @@ class NextEngineOrderDetailDownloader:
         else:
             # 新規タブが開かなかった場合は同一ページ遷移（旧挙動）を待つ。
             try:
-                await page.wait_for_load_state("domcontentloaded", timeout=60000)
+                await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
                 await page.wait_for_timeout(2000)
             except Exception:
                 pass
@@ -295,7 +296,7 @@ class NextEngineOrderDetailDownloader:
         if _is_next_engine_news_page(page):
             await self._dismiss_news_page(page)
             try:
-                await page.goto(PLATFORM_URL, wait_until="domcontentloaded", timeout=60000)
+                await page.goto(PLATFORM_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
                 await page.wait_for_timeout(1000)
             except Exception:
                 pass
@@ -361,7 +362,7 @@ class NextEngineOrderDetailDownloader:
         last_html: Path | None = None
         for attempt in range(1, 4):
             try:
-                await page.goto(ORDER_DETAIL_URL, wait_until="domcontentloaded", timeout=60000)
+                await page.goto(ORDER_DETAIL_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
                 await self._remove_backdrops(page)
                 await page.wait_for_selector("#jyuchu_dlg_open", timeout=30000)
                 return
@@ -436,14 +437,14 @@ class NextEngineOrderDetailDownloader:
         for attempt in range(1, 4):
             try:
                 await self._prepare_next_engine_download_click(page)
-                async with page.expect_download(timeout=90000) as download_info:
+                async with page.expect_download(timeout=download_timeout_ms(90000)) as download_info:
                     await _click_first_visible(candidates, "ダウンロード")
                 return await download_info.value
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
                 await self._save_debug_artifacts(page, f"download_click_failed_attempt_{attempt}")
                 if attempt < 3:
-                    await page.reload(wait_until="domcontentloaded", timeout=60000)
+                    await page.reload(wait_until="domcontentloaded", timeout=nav_timeout_ms())
                     await self._wait_for_download_link(page)
 
         raise RuntimeError(f"Next Engine のCSVダウンロードを開始できませんでした。{last_error}")

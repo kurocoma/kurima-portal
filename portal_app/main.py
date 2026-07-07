@@ -42,8 +42,21 @@ from portal_app.services.next_engine_downloader import (
     download_next_engine_order_details_sync,
 )
 from portal_app.services.next_engine_order_status import restore_next_engine_print_wait_batch_sync
+from portal_app.log_paths import error_log_file_name, run_log_file_name
 from portal_app.services.paths import candidate_portal_roots, find_portal_paths, latest_order_csv
-from portal_app.services.progress_jobs import JobCancelled, progress_jobs, read_job_history
+from portal_app.services.progress_jobs import (
+    DuplicateJobError,
+    JobCancelled,
+    progress_jobs,
+    read_job_history,
+)
+from portal_app.settings import (
+    allowed_client_rules,
+    client_allowed,
+    download_timeout_ms,
+    nav_timeout_ms,
+    settings_snapshot,
+)
 from portal_app.services.shipment_confirmation import (
     confirm_next_engine_shipment_sync,
     create_shipment_slip_import_csv,
@@ -76,6 +89,30 @@ from portal_app.services.yamato_conversion import (
 APP_DIR = Path(__file__).resolve().parent
 LOGS_ROOT = APP_DIR.parent / "logs"
 LOG_VIEW_MAX_BYTES = 200_000
+
+
+def _git_short_head() -> str:
+    """ディスク上リポジトリの短縮コミットSHAを返す（git 不在・非リポジトリなら "unknown"）。"""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=APP_DIR.parent,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return "unknown"
+    if proc.returncode != 0:
+        return "unknown"
+    return proc.stdout.strip() or "unknown"
+
+
+# 稼働バージョンの可視化（S4）: uvicorn は --reload なしだと .py 変更を自動反映しないため、
+# 「いま動いているコード」の commit と起動時刻をプロセス起動時に 1 回だけ確定して保持する。
+# /health とフッターに出し、ディスク上の HEAD との乖離＝再起動忘れを検知できるようにする。
+APP_VERSION = _git_short_head()
+APP_STARTED_AT = datetime.now().strftime("%Y-%m-%d %H:%M")
 LOG_VIEW_TEXT_SUFFIXES = {
     ".log",
     ".txt",
@@ -93,10 +130,53 @@ LOG_VIEW_TEXT_SUFFIXES = {
 app = FastAPI(title="くりまポータルツール")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=APP_DIR / "templates")
+# 全画面共通のフッター表示用（S4）。リクエストによらず不変のため Jinja グローバルで配る。
+templates.env.globals["app_version"] = APP_VERSION
+templates.env.globals["app_started_at"] = APP_STARTED_AT
 INVENTORY_TABS = {"normal", "takaesu"}
 
 # アプリ読込（＝サーバー起動）を実行ログへ記録する。
-portal_logger.info("ポータル起動: app=くりまポータルツール log_dir=%s", RUNTIME_LOG_DIR)
+portal_logger.info(
+    "ポータル起動: app=くりまポータルツール version=%s log_dir=%s", APP_VERSION, RUNTIME_LOG_DIR
+)
+
+# logs/ の保持期間クリーンアップ（S6）。起動をブロックしないバックグラウンド実行で、
+# ここが失敗してもサーバー本体は起動を継続する（フェイルセーフ）。
+try:
+    from portal_app.services.log_retention import start_background_cleanup
+
+    start_background_cleanup()
+except Exception:
+    portal_logger.error("ログクリーンアップの開始に失敗しました", exc_info=True)
+
+
+@app.middleware("http")
+async def _restrict_clients(request: Request, call_next):
+    """LAN 公開時の簡易アクセス制御（O3）。
+
+    `KURIMA_ALLOWED_CLIENTS`（カンマ区切りの IP / CIDR / プレフィックス）に一致しない
+    接続元を 403 で拒否する。**未設定なら無制限＝現行互換**。ループバック
+    （127.0.0.1 / ::1）は常に許可し、ホストPC自身が設定ミスで締め出されないようにする。
+    実決済（クリックポスト）・実取込（ヤマトB2）ボタンを LAN 上の任意の端末へ
+    露出させないための防壁で、判定は接続ごとに env を読む（再起動不要ではないが
+    .env 変更＋再起動のみで反映される）。
+    """
+    client_host = request.client.host if request.client else None
+    if not client_allowed(client_host):
+        portal_logger.warning(
+            "アクセス拒否(403): %s %s from %s (KURIMA_ALLOWED_CLIENTS=%s)",
+            request.method,
+            request.url.path,
+            client_host,
+            ",".join(allowed_client_rules()),
+        )
+        return PlainTextResponse(
+            "このパソコンからの利用は許可されていません。"
+            "利用する場合は、ホストPCの .env の KURIMA_ALLOWED_CLIENTS に"
+            f"このパソコンのIPアドレス（{client_host}）を追加して再起動してください。",
+            status_code=403,
+        )
+    return await call_next(request)
 
 
 @app.exception_handler(Exception)
@@ -110,6 +190,23 @@ async def _log_unhandled_exception(request: Request, exc: Exception) -> PlainTex
         exc_info=exc,
     )
     return PlainTextResponse("Internal Server Error", status_code=500)
+
+
+@app.exception_handler(DuplicateJobError)
+async def _duplicate_job_conflict(request: Request, exc: DuplicateJobError) -> PlainTextResponse:
+    """二重実行ガード（S3）: 実行中の同一 workflow があるときの /start を 409 で拒否する。
+
+    各画面の進捗JSは response.ok でないときレスポンス本文をそのまま表示するため、
+    日本語メッセージを text/plain で返すだけで画面に対処文が出る（フロント側の変更不要）。
+    """
+    portal_logger.info(
+        "二重実行を拒否: %s %s workflow=%s 実行中job=%s",
+        request.method,
+        request.url.path,
+        exc.workflow,
+        exc.existing_job_id,
+    )
+    return PlainTextResponse(str(exc), status_code=409)
 
 
 def _parse_order_numbers(raw: str | None) -> tuple[str, ...]:
@@ -856,6 +953,15 @@ def clickpost_preview(request: Request):
                 "preview_error": str(exc),
             },
         )
+
+
+@app.get("/progress/active")
+def progress_active():
+    # 実行中（queued/running）ジョブの一覧（U4）。各画面のロード時の自動再アタッチと、
+    # ナビ「実行履歴」の実行中バッジが使う軽量API（メモリ内走査のみ）。
+    # 注意: /progress/{job_id} より先に登録すること（後だと job_id="active" に飲まれる）。
+    jobs = progress_jobs.list_active()
+    return {"jobs": jobs, "count": len(jobs)}
 
 
 @app.get("/progress/{job_id}")
@@ -2693,30 +2799,86 @@ def jobs_history(request: Request):
     )
 
 
-def _resolve_log_path(raw: str) -> Path | None:
-    """?path= で受けた相対パスを logs/ 配下に正規化する。
+def _viewable_log_file(path: Path) -> bool:
+    """/logs の「表示」対象にできるテキスト形式か。
 
-    resolve() 後に logs ルート配下であることを検証し、
+    ローテーション世代（portal-run-<PC>.log.1 等、S1 で発生）も表示できるよう、
+    拡張子セットに加えて「.log.<数字>」も許可する。
+    """
+    if path.suffix.lower() in LOG_VIEW_TEXT_SUFFIXES:
+        return True
+    suffixes = [suffix.lower() for suffix in path.suffixes]
+    return (
+        len(suffixes) >= 2
+        and suffixes[-2] == ".log"
+        and suffixes[-1].lstrip(".").isdigit()
+    )
+
+
+def _resolve_log_path(raw: str, source: str = "repo") -> Path | None:
+    """?path= で受けた相対パスを許可ルート配下に正規化する。
+
+    許可ルートは 2 つ（U2）: source=repo → リポジトリ内 logs/、
+    source=shared → 共有ログフォルダ（RUNTIME_LOG_DIR、SharePoint 側）。
+    resolve() 後にルート配下であることを検証し、
     `..%2F.env` のようなパストラバーサルや絶対パス指定を拒否する（None を返す）。
     """
     if not raw:
         return None
+    root = RUNTIME_LOG_DIR if source == "shared" else LOGS_ROOT
     candidate = Path(raw)
     if candidate.is_absolute():
         return None
     try:
-        logs_root = LOGS_ROOT.resolve()
-        resolved = (LOGS_ROOT / candidate).resolve()
+        root_resolved = root.resolve()
+        resolved = (root / candidate).resolve()
     except OSError:
         return None
-    if resolved == logs_root or not resolved.is_relative_to(logs_root):
+    if resolved == root_resolved or not resolved.is_relative_to(root_resolved):
         return None
     return resolved
+
+
+def _shared_log_entries() -> list[dict[str, object]]:
+    """共有ログ（RUNTIME_LOG_DIR。SharePoint 側の portal-run/error）の一覧を作る（U2）。
+
+    fallback で RUNTIME_LOG_DIR がリポジトリ内 logs/ を指す場合は
+    rglob 側と二重表示になるため出さない。一覧の失敗は握りつぶして空
+    （共有フォルダの不調で /logs 自体を壊さない）。
+    """
+    entries: list[dict[str, object]] = []
+    try:
+        if not RUNTIME_LOG_DIR.is_dir() or RUNTIME_LOG_DIR.resolve() == LOGS_ROOT.resolve():
+            return entries
+        for path in RUNTIME_LOG_DIR.iterdir():
+            if not path.is_file():
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            entries.append(
+                {
+                    "rel": path.name,
+                    "scope": "共有",
+                    "mtime": stat.st_mtime,
+                    "updated_at": datetime.fromtimestamp(stat.st_mtime).strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    ),
+                    "size": stat.st_size,
+                    "viewable": _viewable_log_file(path),
+                    "view_url": f"/logs/view?path={quote(path.name)}&source=shared",
+                }
+            )
+    except OSError:
+        return entries
+    return entries
 
 
 @app.get("/logs", response_class=HTMLResponse)
 def logs_index(request: Request):
     # logs/ 配下のファイルを更新日時の新しい順に一覧する（エラー調査の入口）。
+    # 共有ログ（SharePoint 側の portal-run/error、U2）も「共有」ラベル付きで同じ一覧に出す。
     entries: list[dict[str, object]] = []
     if LOGS_ROOT.is_dir():
         for path in LOGS_ROOT.rglob("*"):
@@ -2730,13 +2892,15 @@ def logs_index(request: Request):
             entries.append(
                 {
                     "rel": rel,
+                    "scope": "アプリ内",
                     "mtime": stat.st_mtime,
                     "updated_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
                     "size": stat.st_size,
-                    "viewable": path.suffix.lower() in LOG_VIEW_TEXT_SUFFIXES,
+                    "viewable": _viewable_log_file(path),
                     "view_url": f"/logs/view?path={quote(rel)}",
                 }
             )
+    entries.extend(_shared_log_entries())
     entries.sort(key=lambda entry: entry["mtime"], reverse=True)
     return templates.TemplateResponse(
         "logs.html",
@@ -2749,13 +2913,15 @@ def logs_index(request: Request):
 
 
 @app.get("/logs/view", response_class=HTMLResponse)
-def logs_view(request: Request, path: str = ""):
-    resolved = _resolve_log_path(path)
+def logs_view(request: Request, path: str = "", source: str = "repo"):
+    if source not in {"repo", "shared"}:
+        source = "repo"
+    resolved = _resolve_log_path(path, source)
     if resolved is None:
-        return PlainTextResponse("不正なパスです。logs/ 配下の相対パスのみ指定できます。", status_code=400)
+        return PlainTextResponse("不正なパスです。ログフォルダ配下の相対パスのみ指定できます。", status_code=400)
     if not resolved.is_file():
         return PlainTextResponse("ログファイルが見つかりません。", status_code=404)
-    if resolved.suffix.lower() not in LOG_VIEW_TEXT_SUFFIXES:
+    if not _viewable_log_file(resolved):
         return PlainTextResponse("テキスト形式のログのみ表示できます。", status_code=400)
 
     try:
@@ -2766,13 +2932,17 @@ def logs_view(request: Request, path: str = ""):
         return PlainTextResponse(f"ログの読み込みに失敗しました: {exc}", status_code=500)
 
     truncated = stat.st_size > LOG_VIEW_MAX_BYTES
+    if source == "shared":
+        display_path = f"共有ログ/{resolved.relative_to(RUNTIME_LOG_DIR.resolve()).as_posix()}"
+    else:
+        display_path = f"logs/{resolved.relative_to(LOGS_ROOT.resolve()).as_posix()}"
     # 表示はテンプレート側の autoescape に任せる（HTMLログも生埋め込みしない）。
     content = raw.decode("utf-8", errors="replace")
     return templates.TemplateResponse(
         "log_view.html",
         {
             "request": request,
-            "rel_path": resolved.relative_to(LOGS_ROOT.resolve()).as_posix(),
+            "display_path": display_path,
             "content": content,
             "size": stat.st_size,
             "updated_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
@@ -2782,6 +2952,64 @@ def logs_view(request: Request, path: str = ""):
     )
 
 
+@app.get("/settings", response_class=HTMLResponse)
+def settings_page(request: Request):
+    """設定画面（U6・閲覧のみ）: .env の見える化。
+
+    README の設定キー群の設定状況（PASSWORD / LOGIN_ID 等の秘密は先頭2文字＋***で
+    マスク）と、パス解決・ログ出力先・タイムアウトの実効値・稼働バージョンを表示する。
+    doctor.py をコマンドラインで実行しなくても「動かない原因が設定かどうか」を
+    画面だけで切り分けられるようにする。値の編集は従来どおり `.env`＋再起動。
+    """
+    # パス解決の結果（未解決でも 500 にせず、エラー文と候補を表示する）
+    resolution: dict[str, object]
+    try:
+        paths = find_portal_paths()
+        resolution = {
+            "ok": True,
+            "portal_root": str(paths.portal_root),
+            "master_book": str(paths.master_book),
+            "order_csv_dir": str(paths.order_csv_dir),
+        }
+    except Exception as exc:
+        resolution = {
+            "ok": False,
+            "error": str(exc),
+            "candidates": [str(path) for path in candidate_portal_roots()],
+        }
+
+    runtime = {
+        "version": APP_VERSION,
+        "started_at": APP_STARTED_AT,
+        "log_dir": str(RUNTIME_LOG_DIR),
+        "run_log_name": run_log_file_name(),
+        "error_log_name": error_log_file_name(),
+        "nav_timeout_ms": nav_timeout_ms(),
+        "download_timeout_ms": download_timeout_ms(),
+        "allowed_clients": ", ".join(allowed_client_rules()) or "未設定（すべて許可）",
+    }
+    return templates.TemplateResponse(
+        "settings.html",
+        {
+            "request": request,
+            "groups": settings_snapshot(),
+            "resolution": resolution,
+            "runtime": runtime,
+        },
+    )
+
+
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    # 死活監視＋稼働バージョン確認（S4）。version（起動時に確定）と head_on_disk
+    # （毎回取得）の乖離は「update 済みだが再起動忘れ」を意味する。
+    head_on_disk = _git_short_head()
+    return {
+        "status": "ok",
+        "version": APP_VERSION,
+        "started_at": APP_STARTED_AT,
+        "head_on_disk": head_on_disk,
+        "restart_required": (
+            APP_VERSION != "unknown" and head_on_disk != "unknown" and APP_VERSION != head_on_disk
+        ),
+    }

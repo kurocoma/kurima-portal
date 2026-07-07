@@ -33,6 +33,7 @@ from portal_app.services.next_engine_order_status import (
     restore_next_engine_print_wait_batch_sync,
 )
 from portal_app.services.paths import PortalPaths, find_portal_paths
+from portal_app.settings import download_timeout_ms, nav_timeout_ms
 
 
 ORDER_LIST_PRINT_WAIT_URL = "https://main.next-engine.com/Userjyuchu/index?search_condi=17"
@@ -1211,7 +1212,7 @@ class ClickPostClient:
                     await page.goto(
                         CLICKPOST_MYPAGE_URL,
                         wait_until="domcontentloaded",
-                        timeout=60000,
+                        timeout=nav_timeout_ms(),
                     )
                     await page.wait_for_timeout(1000)
                     logged_in = await _page_contains(page, "マイページ", timeout=10000)
@@ -1287,7 +1288,7 @@ class ClickPostClient:
                         ],
                         "クリックポストまとめ申込の次へ",
                     )
-                    await page.wait_for_load_state("domcontentloaded", timeout=60000)
+                    await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
                     await _click_first_visible(
                         [
                             page.locator('input[name="create"][type="submit"]'),
@@ -1296,7 +1297,7 @@ class ClickPostClient:
                         ],
                         "クリックポストまとめ申込確認の次へ",
                     )
-                    await page.wait_for_load_state("domcontentloaded", timeout=60000)
+                    await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
                     ready = await _page_contains(page, "まとめ申込 支払手続き", timeout=60000)
                     warning_text = None if ready else await _page_text_excerpt(page)
                     await context.storage_state(path=str(CLICKPOST_STORAGE_STATE_PATH))
@@ -1345,7 +1346,7 @@ class ClickPostClient:
                 try:
                     page = await context.new_page()
                     await self._login(page)
-                    await page.goto(CLICKPOST_MYPAGE_URL, wait_until="domcontentloaded", timeout=60000)
+                    await page.goto(CLICKPOST_MYPAGE_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
                     await page.wait_for_timeout(1500)
                     remaining_payment_buttons = await _count_visible(
                         page.locator('input.ywallet_button, input[name^="wallet_button["]')
@@ -1376,11 +1377,11 @@ class ClickPostClient:
                             break
                         payment_attempts += 1
                         await payment_button.click()
-                        await page.wait_for_load_state("domcontentloaded", timeout=60000)
+                        await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
                         await page.wait_for_timeout(1500)
                         await self._complete_wallet_payment(page)
                         payments_completed += 1
-                        await page.goto(CLICKPOST_MYPAGE_URL, wait_until="domcontentloaded", timeout=60000)
+                        await page.goto(CLICKPOST_MYPAGE_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
                         await page.wait_for_timeout(1500)
 
                     remaining_payment_buttons = await _count_visible(
@@ -1693,7 +1694,7 @@ class ClickPostClient:
             ],
             "クリックポストまとめ申込の次へ",
         )
-        await page.wait_for_load_state("domcontentloaded", timeout=60000)
+        await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
         await _click_first_visible(
             [
                 page.locator('input[name="create"][type="submit"]'),
@@ -1702,7 +1703,7 @@ class ClickPostClient:
             ],
             "クリックポストまとめ申込確認の次へ",
         )
-        await page.wait_for_load_state("domcontentloaded", timeout=60000)
+        await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
         await page.wait_for_timeout(1500)
 
     async def _complete_available_wallet_payments(self, page, max_payments: int) -> tuple[int, int, int]:
@@ -1728,13 +1729,13 @@ class ClickPostClient:
                 if next_payment is None:
                     break
                 await next_payment.click()
-                await page.wait_for_load_state("domcontentloaded", timeout=60000)
+                await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
                 await page.wait_for_timeout(1500)
                 continue
 
             payment_attempts += 1
             await payment_button.click()
-            await page.wait_for_load_state("domcontentloaded", timeout=60000)
+            await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
             await page.wait_for_timeout(1500)
             await self._complete_wallet_payment(page)
             payments_completed += 1
@@ -1784,7 +1785,7 @@ class ClickPostClient:
         return output_csv, complete_tracking_count, workbook_path, workbook_updated, warnings
 
     async def _scrape_clickpost_tracking_rows(self, page) -> list[dict[str, str]]:
-        await page.goto(CLICKPOST_MYPAGE_URL, wait_until="domcontentloaded", timeout=60000)
+        await page.goto(CLICKPOST_MYPAGE_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
         await page.wait_for_timeout(1500)
         await page.wait_for_selector("table", timeout=30000)
         rows = await page.evaluate(
@@ -1892,7 +1893,7 @@ class ClickPostClient:
                 ],
                 "Yahooウォレットログイン次へ",
             )
-            await page.wait_for_load_state("domcontentloaded", timeout=60000)
+            await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
             await page.wait_for_timeout(1500)
 
         password_input = page.locator("#password, input[name='passwd'], input[type='password']").first
@@ -1916,11 +1917,11 @@ class ClickPostClient:
                 )
             except RuntimeError:
                 await password_field.press("Enter")
-            await page.wait_for_load_state("domcontentloaded", timeout=60000)
+            await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
             await page.wait_for_timeout(2500)
 
     async def _download_multiple_print_pdf(self, page, output_dir: Path) -> tuple[Path | None, int]:
-        await page.goto(CLICKPOST_MYPAGE_URL, wait_until="domcontentloaded", timeout=60000)
+        await page.goto(CLICKPOST_MYPAGE_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
         await page.wait_for_timeout(1500)
         await _click_first_visible(
             [
@@ -1932,7 +1933,7 @@ class ClickPostClient:
             ],
             "クリックポストまとめ印字メニュー",
         )
-        await page.wait_for_load_state("domcontentloaded", timeout=60000)
+        await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
         await page.wait_for_timeout(1500)
         row_checkboxes = page.locator("input[type='checkbox']:not(#all_check):not(#print_agree)")
         print_target_rows = max(await row_checkboxes.count(), 0)
@@ -1988,7 +1989,7 @@ class ClickPostClient:
         if hasattr(value, "save_as"):
             await value.save_as(str(output_path))
         else:
-            await value.wait_for_load_state("domcontentloaded", timeout=60000)
+            await value.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
             await page.wait_for_timeout(1500)
             response = await value.context.request.get(value.url)
             content_type = response.headers.get("content-type", "")
@@ -2003,7 +2004,7 @@ class ClickPostClient:
         return output_path, print_target_rows
 
     async def _login(self, page) -> None:
-        await page.goto(CLICKPOST_URL, wait_until="domcontentloaded", timeout=60000)
+        await page.goto(CLICKPOST_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
         await page.wait_for_timeout(1500)
         if await _page_contains(page, "マイページ", timeout=3000):
             return
@@ -2014,7 +2015,7 @@ class ClickPostClient:
             page.get_by_role("link", name=re.compile("ログイン")),
         ]
         await _click_first_visible(login_buttons, "クリックポストログイン")
-        await page.wait_for_load_state("domcontentloaded", timeout=60000)
+        await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
         await page.wait_for_timeout(1500)
 
         login_id = self.credential.yahoo_login_id
@@ -2033,7 +2034,7 @@ class ClickPostClient:
                 ],
                 "Yahooログイン次へ",
             )
-            await page.wait_for_load_state("domcontentloaded", timeout=60000)
+            await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
 
         password_input = page.locator("#password, input[name='passwd'], input[type='password']")
         if await _is_visible(password_input, timeout=10000):
@@ -2056,7 +2057,7 @@ class ClickPostClient:
                 )
             except RuntimeError:
                 await password_field.press("Enter")
-            await page.wait_for_load_state("domcontentloaded", timeout=60000)
+            await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
             await page.wait_for_timeout(2500)
 
         login_timeout = 600000 if not self.headless else 15000
@@ -2078,7 +2079,7 @@ class ClickPostClient:
             ],
             "クリックポストまとめ申込",
         )
-        await page.wait_for_load_state("domcontentloaded", timeout=60000)
+        await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
         await page.wait_for_selector('input[type="file"]', timeout=30000)
 
 
@@ -2922,7 +2923,7 @@ async def _open_clickpost_order_list_page(page, login_client: NextEngineOrderDet
     for attempt in range(1, 4):
         try:
             await login_client._login(page)
-            await page.goto(ORDER_LIST_PRINT_WAIT_URL, wait_until="domcontentloaded", timeout=60000)
+            await page.goto(ORDER_LIST_PRINT_WAIT_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
             await page.wait_for_timeout(2500)
             await login_client._remove_backdrops(page)
 
@@ -3124,7 +3125,7 @@ async def _open_next_engine_main_from_base(
         try:
             if candidate.is_closed():
                 continue
-            await candidate.wait_for_load_state("domcontentloaded", timeout=60000)
+            await candidate.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
             await candidate.bring_to_front()
             return candidate
         except Exception:
@@ -3174,7 +3175,7 @@ async def _open_meisai_page(
     async with page.context.expect_page(timeout=60000) as new_page_info:
         await exec_button.click()
     meisai_page = await new_page_info.value
-    await meisai_page.wait_for_load_state("domcontentloaded", timeout=60000)
+    await meisai_page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
     if "base.next-engine.org" in meisai_page.url:
         meisai_page = await _open_next_engine_main_from_base(meisai_page, login_client=login_client)
         if "base.next-engine.org" in meisai_page.url:
@@ -3184,7 +3185,7 @@ async def _open_meisai_page(
             except Exception:
                 pass
             meisai_page = await _open_next_engine_main_from_base(page, login_client=login_client)
-        await meisai_page.goto(ORDER_DETAIL_LIST_URL, wait_until="domcontentloaded", timeout=60000)
+        await meisai_page.goto(ORDER_DETAIL_LIST_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
         await meisai_page.wait_for_timeout(2500)
     await _wait_for_meisai_download_link(meisai_page)
     return meisai_page
@@ -3201,7 +3202,7 @@ async def _wait_for_meisai_download_link(page) -> None:
         if "base.next-engine.org" in page.url:
             try:
                 page = await _open_next_engine_main_from_base(page)
-                await page.goto(ORDER_DETAIL_LIST_URL, wait_until="domcontentloaded", timeout=60000)
+                await page.goto(ORDER_DETAIL_LIST_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
                 await page.wait_for_timeout(2500)
             except Exception:
                 pass
@@ -3210,7 +3211,7 @@ async def _wait_for_meisai_download_link(page) -> None:
             return
         if attempt < 3:
             try:
-                await page.reload(wait_until="domcontentloaded", timeout=60000)
+                await page.reload(wait_until="domcontentloaded", timeout=nav_timeout_ms())
                 await page.wait_for_timeout(2500)
             except Exception:
                 await page.wait_for_timeout(2500)
@@ -3238,7 +3239,7 @@ async def _download_ne_csv_from_current_page(page, destination: Path, *, label: 
             break
 
         try:
-            async with page.expect_download(timeout=60000) as download_info:
+            async with page.expect_download(timeout=download_timeout_ms(60000)) as download_info:
                 await visible_locator.click(force=True)
             download = await download_info.value
             await download.save_as(str(destination))
@@ -3290,7 +3291,7 @@ async def _download_invoice_pdf_from_order_list(
     await page.wait_for_selector(INVOICE_DOWNLOAD_BUTTON_ID, timeout=30000)
     await _set_clickpost_invoice_options(page, mode="U")
 
-    async with page.expect_download(timeout=180000) as download_info:
+    async with page.expect_download(timeout=download_timeout_ms(180000)) as download_info:
         await page.locator(INVOICE_DOWNLOAD_BUTTON_ID).click()
     download = await download_info.value
     await download.save_as(str(destination))
@@ -3343,7 +3344,7 @@ async def _prepare_next_engine_download_click(page) -> None:
 
 async def _reload_next_engine_download_page(page) -> None:
     try:
-        await page.reload(wait_until="domcontentloaded", timeout=60000)
+        await page.reload(wait_until="domcontentloaded", timeout=nav_timeout_ms())
         await page.wait_for_timeout(2500)
     except Exception:
         await page.wait_for_timeout(2500)

@@ -1232,6 +1232,24 @@ button {
   color: var(--primary);
 }
 
+/* ナビ「実行履歴」の実行中件数バッジ（U4）。実行中ジョブがあるときだけ表示される */
+.nav-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  margin-left: 5px;
+  padding: 0 4px;
+  border-radius: 99px;
+  background: var(--warn, #b3690f);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: 1px;
+}
+
 .text-link {
   color: var(--primary);
   font-weight: 600;
@@ -1413,6 +1431,18 @@ button {
   display: none;
 }
 
+/* 失敗時の日本語対処ガイド（U1: エラー表示の下に「原因＋次にやること」を出す） */
+.progress-hint {
+  margin: 6px 0 0;
+  color: var(--text-2);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.progress-hint[hidden] {
+  display: none;
+}
+
 /* ---------- flow chip progress states (実行中=点滅 / 完了 / 失敗) ---------- */
 .flow-chip.is-active {
   border-color: var(--primary);
@@ -1570,4 +1600,20 @@ button {
   .op-form .btn {
     width: 100%;
   }
+}
+
+/* ---------- footer（S4: 稼働バージョンの可視化） ---------- */
+.appfoot {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  padding: 0 24px 28px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted-3);
+  font-size: 12px;
+}
+
+.appfoot-sep {
+  color: var(--muted-4);
 }

@@ -18,6 +18,7 @@ from playwright.async_api import async_playwright
 from portal_app.services.next_engine_downloader import APP_ROOT, _chromium_launch_options
 from portal_app.services.paths import find_portal_paths
 from portal_app.services.yamato_conversion import COMPLETE_DIR_NAME, YAMATO_OUTPUT_HEADERS, latest_csv
+from portal_app.settings import nav_timeout_ms
 
 
 DEFAULT_YAMATO_B2_MEMBER_LOGIN_URL = (
@@ -596,14 +597,14 @@ async def _login_to_b2(
             "portal_tool/.env に設定してください（.env.example 参照）。",
         )
     if not skip_initial_goto:
-        await page.goto(_yamato_b2_url(), wait_until="domcontentloaded", timeout=60000)
+        await page.goto(_yamato_b2_url(), wait_until="domcontentloaded", timeout=nav_timeout_ms())
         await page.wait_for_timeout(1000)
         await _follow_meta_refresh_if_present(page)
         await page.wait_for_timeout(1000)
     await _dismiss_b2_interstitials(page, warnings=warnings)
     if _is_b2_system_error_url(page.url):
         warnings.append("B2の入口URLがシステムエラー画面だったため、ログイン入口へ切り替えました。")
-        await page.goto(DEFAULT_YAMATO_B2_MEMBER_LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
+        await page.goto(DEFAULT_YAMATO_B2_MEMBER_LOGIN_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
         await page.wait_for_timeout(1000)
         await _dismiss_b2_interstitials(page, warnings=warnings)
 
@@ -617,7 +618,7 @@ async def _login_to_b2(
             "B2メンバーズの【システムエラー】画面を検出（前回セッションの残留が原因）。"
             "ログイン画面へ入り直して再ログインします。"
         )
-        await page.goto(DEFAULT_YAMATO_B2_MEMBER_LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
+        await page.goto(DEFAULT_YAMATO_B2_MEMBER_LOGIN_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
         await page.wait_for_timeout(1000)
         await _dismiss_b2_interstitials(page, warnings=warnings)
 
@@ -644,7 +645,7 @@ async def _login_to_b2(
         optional=True,
     )
     if not user_filled:
-        await page.goto(DEFAULT_YAMATO_B2_MEMBER_LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
+        await page.goto(DEFAULT_YAMATO_B2_MEMBER_LOGIN_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
         await page.wait_for_timeout(1500)
         await _dismiss_b2_interstitials(page, warnings=warnings)
         user_filled = await _fill_first_visible(
@@ -688,7 +689,7 @@ async def _login_to_b2(
             """
         )
     try:
-        await page.wait_for_load_state("domcontentloaded", timeout=60000)
+        await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
     except PlaywrightTimeoutError:
         warnings.append("B2ログイン後の画面ロード完了待ちがタイムアウトしました。")
     await page.wait_for_timeout(2500)
@@ -919,7 +920,7 @@ async def _follow_meta_refresh_if_present(page) -> None:
     if not urlsplit(resolved).scheme:
         return
     try:
-        await page.goto(resolved, wait_until="domcontentloaded", timeout=60000)
+        await page.goto(resolved, wait_until="domcontentloaded", timeout=nav_timeout_ms())
     except Exception:
         return
 
@@ -936,7 +937,7 @@ async def _click_b2_error_login_link(page, *, warnings: list[str]) -> bool:
                 continue
             await locator.click(timeout=5000)
             try:
-                await page.wait_for_load_state("domcontentloaded", timeout=60000)
+                await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
             except PlaywrightTimeoutError:
                 pass
             await page.wait_for_timeout(2000)
@@ -1245,7 +1246,7 @@ async def _evaluate_with_optional_popup(page, script: str):
 async def _page_after_possible_popup(page, popup_task):
     try:
         active_page = await popup_task
-        await active_page.wait_for_load_state("domcontentloaded", timeout=60000)
+        await active_page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
     except Exception:
         active_page = page
     await active_page.wait_for_timeout(5000)

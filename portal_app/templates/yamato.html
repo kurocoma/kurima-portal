@@ -223,6 +223,7 @@
   </div>
   <ol id="progress-steps" class="progress-steps"></ol>
   <p id="progress-error" class="progress-error" hidden></p>
+  <p id="progress-hint" class="progress-hint" hidden></p>
 </div>
 
 {% if defer_preview %}
@@ -234,162 +235,18 @@
 {% endif %}
 
 <script>
-(() => {
-  const panel = document.getElementById("progress-panel");
-  if (!panel) return;
-  const title = document.getElementById("progress-title");
-  const message = document.getElementById("progress-message");
-  const statusBadge = document.getElementById("progress-status");
-  const stepsList = document.getElementById("progress-steps");
-  const errorBox = document.getElementById("progress-error");
-  const cancelBtn = document.getElementById("progress-cancel");
-  const forms = document.querySelectorAll("[data-progress-form]");
-  let currentJobId = null;
-
+// 進捗表示は共通スクリプト（/static/progress.js。base.html が読み込む）が担当する。
+// ここではページ固有の設定だけを渡す（U7: 進捗JSの共通化）。
+window.KURIMA_PROGRESS = {
+  // このページで開始しうる workflow（リロード時の再アタッチ対象。U4）
+  workflows: ["yamato_run_selected", "yamato_run_full", "yamato_b2_open"],
+  startTitle: "ヤマト用CSV作成",
   // prepare=受注取得〜CSV作成(チップ①〜⑤), b2_open/open/b2_import=B2取込(チップ⑥)
-  const flowChips = [...document.querySelectorAll(".flow [data-chip]")];
-  const STEP_CHIPS = { ne_fetch: [1], invoice: [2], custom: [3], conversion: [4, 5], b2_open: [6], open: [6], b2_import: [6] };
-  const clearFlowChips = () => {
-    for (const chip of flowChips) chip.classList.remove("is-active", "is-done", "is-failed");
-  };
-  const updateFlowChips = (job) => {
-    const byChip = {};
-    for (const step of job.steps || []) {
-      for (const n of STEP_CHIPS[step.key] || []) {
-        (byChip[n] = byChip[n] || []).push(step.status);
-      }
-    }
-    for (const chip of flowChips) {
-      const n = Number(chip.dataset.chip);
-      const st = byChip[n] || [];
-      chip.classList.remove("is-active", "is-done", "is-failed");
-      if (!st.length) continue;
-      if (st.includes("failed")) chip.classList.add("is-failed");
-      else if (st.includes("running")) chip.classList.add("is-active");
-      else if (st.every((s) => s === "completed")) chip.classList.add("is-done");
-      else if (st.includes("completed")) chip.classList.add("is-active");
-    }
-  };
-
-  const statusLabels = { queued: "待機中", running: "処理中", completed: "完了", failed: "エラー", cancelled: "中止", pending: "待機中" };
-  const stepLabels = { pending: "待機中", running: "処理中", completed: "完了", failed: "エラー" };
-
-  const render = (job) => {
-    panel.hidden = false;
-    panel.classList.toggle("ok", job.status === "completed");
-    panel.classList.toggle("error", job.status === "failed" || job.status === "cancelled");
-    panel.classList.toggle("warn", job.status === "running" || job.status === "queued");
-    const active = job.status === "running" || job.status === "queued";
-    if (cancelBtn) cancelBtn.hidden = !active;
-    title.textContent = job.title || "処理状況";
-    message.textContent = job.message || "";
-    statusBadge.textContent = statusLabels[job.status] || job.status;
-    stepsList.innerHTML = "";
-    for (const step of job.steps || []) {
-      const item = document.createElement("li");
-      item.className = `progress-step is-${step.status}`;
-      const dot = document.createElement("span");
-      dot.className = "step-dot";
-      const body = document.createElement("div");
-      const label = document.createElement("strong");
-      label.textContent = step.label;
-      const detail = document.createElement("small");
-      detail.textContent = `${stepLabels[step.status] || step.status}${step.detail ? " - " + step.detail : ""}`;
-      body.append(label, detail);
-      item.append(dot, body);
-      stepsList.appendChild(item);
-    }
-    errorBox.hidden = !job.error;
-    errorBox.textContent = job.error || "";
-    updateFlowChips(job);
-  };
-
-  const enableButtons = () => {
-    for (const button of document.querySelectorAll("[data-progress-form] button")) button.disabled = false;
-  };
-
-  const poll = async (jobId) => {
-    const response = await fetch(`/progress/${jobId}`, { cache: "no-store" });
-    if (!response.ok) throw new Error("進捗を取得できませんでした。");
-    const job = await response.json();
-    render(job);
-    if (job.status === "completed") {
-      message.textContent = "完了しました。最新の結果を読み込みます…";
-      setTimeout(() => window.location.assign("/yamato"), 900);
-      return;
-    }
-    if (job.status === "failed" || job.status === "cancelled") {
-      enableButtons();
-      if (cancelBtn) { cancelBtn.hidden = true; cancelBtn.disabled = false; cancelBtn.textContent = "実行を中止"; }
-      return;
-    }
-    setTimeout(() => poll(jobId).catch(showError), 1000);
-  };
-
-  const showError = (error) => {
-    clearFlowChips();
-    panel.hidden = false;
-    panel.classList.remove("ok", "warn");
-    panel.classList.add("error");
-    title.textContent = "処理状況";
-    message.textContent = "進捗表示でエラーが発生しました。";
-    statusBadge.textContent = "エラー";
-    errorBox.hidden = false;
-    errorBox.textContent = error.message || String(error);
-    enableButtons();
-  };
-
-  for (const form of forms) {
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const endpoint = form.dataset.progressEndpoint;
-      if (!endpoint) { form.submit(); return; }
-      // フォーム値（headed 等の checkbox や event.submitter の値）を漏れなく含めるため、
-      // ボタンを無効化する「前」に本文を構築する（無効化された control は entry list から除外されるため）。
-      // さらに fetch に FormData を渡すと multipart になりサーバーの parse_qs が読めないので、
-      // URLSearchParams で urlencoded 送信する。
-      const body = new URLSearchParams(new FormData(form, event.submitter));
-      // data-settings-from を持つフォーム（一括実行）は、参照先フォームの
-      // 詳細設定（テストモード・ブラウザ表示・納品書ステータス詳細確認）を共有する。
-      const settingsFormId = form.dataset.settingsFrom;
-      if (settingsFormId) {
-        const settingsForm = document.getElementById(settingsFormId);
-        if (settingsForm) {
-          const shared = new FormData(settingsForm);
-          for (const key of ["test_restore_print_wait", "verify_invoice_statuses", "headed"]) {
-            if (shared.has(key) && !body.has(key)) body.append(key, shared.get(key));
-          }
-        }
-      }
-      for (const button of document.querySelectorAll("[data-progress-form] button")) button.disabled = true;
-      clearFlowChips();
-      render({ title: "ヤマト用CSV作成", status: "queued", message: "ジョブを開始しています。", steps: [] });
-      try {
-        const response = await fetch(endpoint, { method: "POST", body });
-        if (!response.ok) {
-          const text = await response.text().catch(() => "");
-          throw new Error(text || "処理を開始できませんでした。");
-        }
-        const payload = await response.json();
-        currentJobId = payload.job_id;
-        if (cancelBtn) { cancelBtn.hidden = false; cancelBtn.disabled = false; cancelBtn.textContent = "実行を中止"; }
-        await poll(payload.job_id);
-      } catch (error) {
-        showError(error);
-      }
-    });
-  }
-
-  if (cancelBtn) {
-    cancelBtn.addEventListener("click", async () => {
-      if (!currentJobId) return;
-      cancelBtn.disabled = true;
-      cancelBtn.textContent = "中止しています…";
-      try {
-        await fetch(`/progress/${currentJobId}/cancel`, { method: "POST" });
-      } catch (e) { /* ポーリングが中止状態を拾う */ }
-    });
-  }
-})();
+  stepChips: { ne_fetch: [1], invoice: [2], custom: [3], conversion: [4, 5], b2_open: [6], open: [6], b2_import: [6] },
+  completeRedirect: "/yamato",
+  completeMessage: "完了しました。最新の結果を読み込みます…",
+  // data-settings-from を持つフォーム（一括実行）が参照先フォームと共有する詳細設定
+  settingsShareKeys: ["test_restore_print_wait", "verify_invoice_statuses", "headed"],
+};
 </script>
 {% endblock %}

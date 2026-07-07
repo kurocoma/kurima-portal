@@ -47,3 +47,21 @@ def _strip_quotes(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
         return value[1:-1]
     return value
+
+
+def env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+    """env を int として読む。未設定・数値でない・下限未満は既定値（設定ミスで起動を壊さない）。
+
+    log_paths / log_retention / settings で個別定義されていた読み取りをここへ一元化する。
+    minimum=None なら下限検査なし（0 や負値を「無効化フラグ」として使うキー向け）。
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    if minimum is not None and value < minimum:
+        return default
+    return value

@@ -17,6 +17,7 @@ from portal_app.services.next_engine_downloader import (
     _next_engine_storage_lock,
 )
 from portal_app.services.paths import find_portal_paths
+from portal_app.settings import nav_timeout_ms
 
 
 ORDER_INPUT_URL = (
@@ -414,7 +415,7 @@ class NextEngineOrderStatusClient:
             await page.goto(
                 order_url,
                 wait_until="domcontentloaded",
-                timeout=60000,
+                timeout=nav_timeout_ms(),
             )
             try:
                 await self._wait_order_page_fields(page)
@@ -441,7 +442,7 @@ class NextEngineOrderStatusClient:
 
     async def _open_main_app(self, page: Page) -> None:
         try:
-            await page.goto(MAIN_APP_LAUNCH_URL, wait_until="domcontentloaded", timeout=60000)
+            await page.goto(MAIN_APP_LAUNCH_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
             await page.wait_for_timeout(2500)
             return
         except Exception:
