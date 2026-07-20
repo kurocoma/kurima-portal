@@ -1,10 +1,12 @@
 ﻿from __future__ import annotations
 
 import csv
+import io
 import json
 import subprocess
 import sys
-from datetime import date, datetime
+import zipfile
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, quote
 
@@ -20,11 +22,35 @@ RUNTIME_LOG_DIR = setup_file_logging()
 portal_logger = get_portal_logger()
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
+from portal_app.services.access_analytics import (
+    download_rakuten_device_access_sync,
+    download_yahoo_access_reports_sync,
+    latest_artifact_paths as latest_access_analytics_artifact_paths,
+    read_access_analytics_manifest,
+    read_access_analytics_preview,
+    record_access_analytics_batch,
+    resolve_artifact_path as resolve_access_analytics_artifact_path,
+)
+from portal_app.services.billing_statements import (
+    download_billpay_settlement_sync,
+    download_yahoo_statements_sync,
+    latest_artifact_paths as latest_billing_artifact_paths,
+    read_billing_manifest,
+    read_billing_preview,
+    resolve_artifact_path as resolve_billing_artifact_path,
+)
 from portal_app.services.clickpost import (
     create_clickpost_csv,
     find_clickpost_paths,
@@ -36,6 +62,7 @@ from portal_app.services.clickpost import (
 from portal_app.services.inventory import analyze_latest_inventory, result_to_csv
 from portal_app.services.inventory_pdf import inventory_result_to_pdf, takaesu_order_sheet_to_pdf
 from portal_app.services.letterpack_pdf import create_letterpack_label_pdf
+from portal_app.services.letterpack_tracking import write_letterpack_csv
 from portal_app.services.ne02_order_details import download_ne02_order_details_sync
 from portal_app.services.next_engine_downloader import (
     download_next_engine_order_details,
@@ -81,6 +108,12 @@ from portal_app.services.yamato_b2_import import (
     run_b2_import_over_cdp_sync,
 )
 from portal_app.services.yamato_b2_workflow import prepare_yamato_b2_sync
+from portal_app.services.yamato_flow_profile import (
+    NEKOPOS_PROFILE,
+    YAMATO_PROFILE,
+    YamatoFlowProfile,
+    profile_for_mode,
+)
 from portal_app.services.yamato_conversion import (
     create_ne_to_yamato_csv,
     preview_ne_to_yamato_conversion,
@@ -219,6 +252,14 @@ async def _read_form(request: Request) -> dict[str, str]:
     body = (await request.body()).decode("utf-8")
     parsed = parse_qs(body, keep_blank_values=True)
     return {key: values[-1] if values else "" for key, values in parsed.items()}
+
+
+async def _read_form_values(request: Request) -> dict[str, list[str]]:
+    """urlencodedフォームの同名キーを捨てずに全値返す。"""
+
+    body = (await request.body()).decode("utf-8")
+    parsed = parse_qs(body, keep_blank_values=True)
+    return {key: list(values) for key, values in parsed.items()}
 
 
 def _form_bool(form: dict[str, str], key: str) -> bool:
@@ -471,6 +512,13 @@ def dashboard(request: Request):
             "freshness": freshness,
         },
     )
+
+
+@app.get("/price-calc", response_class=HTMLResponse)
+def price_calc(request: Request):
+    # 税込・割引価格計算（楽天RMS向け）。計算はすべてブラウザ内JS
+    # （static/price_calc.js）で行うため、サーバー側は画面を返すのみ。
+    return templates.TemplateResponse("price_calc.html", {"request": request})
 
 
 @app.get("/inventory", response_class=HTMLResponse)
@@ -800,13 +848,13 @@ def inventory_download_pdf():
 
 @app.get("/inventory/download/pdf/{kind}")
 def inventory_download_pdf_kind(kind: str):
-    if kind not in {"normal", "choice"}:
-        return PlainTextResponse("kind must be normal or choice", status_code=400)
+    # combined = 通常商品とセット内訳をJANで対応付けた数量合算表（依頼2）
+    if kind not in {"normal", "choice", "combined"}:
+        return PlainTextResponse("kind must be normal, choice or combined", status_code=400)
 
     result = analyze_latest_inventory()
-    pdf_bytes = inventory_result_to_pdf(result, "normal" if kind == "normal" else "choice")
-    filename_suffix = "normal" if kind == "normal" else "choice"
-    filename = f"inventory_{filename_suffix}_{result.generated_at:%Y%m%d_%H%M%S}.pdf"
+    pdf_bytes = inventory_result_to_pdf(result, kind)  # type: ignore[arg-type]
+    filename = f"inventory_{kind}_{result.generated_at:%Y%m%d_%H%M%S}.pdf"
     return Response(
         pdf_bytes,
         media_type="application/pdf",
@@ -836,6 +884,13 @@ def yamato_delivery(request: Request):
     return _yamato_response(request, result=None, defer_preview=True)
 
 
+@app.get("/nekopos", response_class=HTMLResponse)
+def nekopos_delivery(request: Request):
+    # 依頼5: ネコポスカード。ヤマト伝票と同じ画面・同じエンドポイントを
+    # mode=nekopos（NEKOPOS_PROFILE）で共用する。
+    return _yamato_response(request, result=None, defer_preview=True, profile=NEKOPOS_PROFILE)
+
+
 def _yamato_response(
     request: Request,
     *,
@@ -847,6 +902,7 @@ def _yamato_response(
     b2_import_result=None,
     defer_preview: bool = False,
     status_code: int = 200,
+    profile: YamatoFlowProfile = YAMATO_PROFILE,
 ):
     return templates.TemplateResponse(
         "yamato.html",
@@ -860,26 +916,29 @@ def _yamato_response(
             "error": error,
             "defer_preview": defer_preview,
             "b2_browser": b2_chrome.status(),
-            "b2_csv_path": _b2_csv_path_text(),
+            "b2_csv_path": _b2_csv_path_text(profile),
             "restore_order_nos_text": "\n".join(
                 _yamato_restore_order_numbers_from_prepare_result(prepare_result)
             ),
+            "mode": profile.key,
+            "mode_label": profile.label,
         },
         status_code=status_code,
     )
 
 
-def _b2_csv_path_text() -> str | None:
-    csv_path = resolve_default_b2_csv()
+def _b2_csv_path_text(profile: YamatoFlowProfile = YAMATO_PROFILE) -> str | None:
+    csv_path = resolve_default_b2_csv(profile.output_prefix)
     return str(csv_path) if csv_path else None
 
 
 @app.get("/yamato/preview", response_class=HTMLResponse)
 def yamato_preview(request: Request):
-    # GET /yamato から遅延ロードされる結果fragment。
-    # 重いプレビュー（商品マスタ読込）はここで実行する。
+    # GET /yamato・/nekopos から遅延ロードされる結果fragment。
+    # 重いプレビュー（商品マスタ読込）はここで実行する。mode で対象CSVを切り替える。
+    profile = profile_for_mode(request.query_params.get("mode"))
     try:
-        result = preview_ne_to_yamato_conversion(preview_limit=30)
+        result = preview_ne_to_yamato_conversion(preview_limit=30, profile=profile)
         return templates.TemplateResponse(
             "_yamato_results.html",
             {
@@ -1026,6 +1085,28 @@ def clickpost_download_letterpack_pdf(filename: str, disposition: str = "attachm
         filename=pdf_path.name,
         content_disposition_type=content_disposition_type,
     )
+
+
+@app.get("/letterpack-tracking", response_class=HTMLResponse)
+def letterpack_tracking_page(request: Request):
+    # レターパック配送番号反映（依頼4）。スキャンとペア管理はブラウザ内JSで行い、
+    # サーバーはCSV書き出し（/letterpack-tracking/create）だけを担当する。
+    return templates.TemplateResponse("letterpack_tracking.html", {"request": request})
+
+
+@app.post("/letterpack-tracking/create")
+async def letterpack_tracking_create(request: Request):
+    # ペア一覧（JSON文字列のフォーム値。フォームはurlencoded必須）を受け取り、
+    # Excel互換の2列CSV（伝票番号,送り状番号・cp932）を「完成したデータ」へ書き出す。
+    form = await _read_form(request)
+    try:
+        pairs = json.loads(form.get("pairs", "[]"))
+        if not isinstance(pairs, list) or not all(isinstance(p, dict) for p in pairs):
+            raise ValueError("ペア一覧の形式が不正です。")
+        path = await run_in_threadpool(write_letterpack_csv, pairs)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    return {"ok": True, "path": str(path), "rows": len(pairs)}
 
 
 @app.get("/shipment-confirmation", response_class=HTMLResponse)
@@ -2000,6 +2081,7 @@ async def yamato_prepare(request: Request):
 @app.post("/yamato/run-selected", response_class=HTMLResponse)
 async def yamato_run_selected(request: Request):
     form = await _read_form(request)
+    profile = profile_for_mode(form.get("mode"))
     selected = _yamato_selected_steps(form)
     order_numbers = _parse_order_numbers(form.get("order_nos"))
     csv_file_raw = form.get("csv_file", "").strip()
@@ -2046,6 +2128,7 @@ async def yamato_run_selected(request: Request):
                 headed=headed,
                 slow_mo_ms=slow_mo_ms,
                 preview_limit=preview_limit,
+                profile=profile,
             )
             current_result = prepare_result.conversion
 
@@ -2066,7 +2149,7 @@ async def yamato_run_selected(request: Request):
 
         if selected["b2_login"] or selected["b2_import"]:
             b2_import_result = await import_yamato_b2_csv(
-                csv_file=Path(csv_file_raw) if csv_file_raw else None,
+                csv_file=Path(csv_file_raw) if csv_file_raw else resolve_default_b2_csv(profile.output_prefix),
                 check_login=selected["b2_login"] and not selected["b2_import"],
                 open_import_page=False,
                 select_file_dry_run=selected["b2_import"] and not confirm_import,
@@ -2078,7 +2161,9 @@ async def yamato_run_selected(request: Request):
             )
 
         if current_result is None:
-            current_result = preview_ne_to_yamato_conversion(preview_limit=preview_limit)
+            current_result = preview_ne_to_yamato_conversion(
+                preview_limit=preview_limit, profile=profile
+            )
 
         message = "選択した処理を実行しました。"
         if selected["b2_import"] and not confirm_import:
@@ -2100,11 +2185,12 @@ async def yamato_run_selected(request: Request):
             restore_result=restore_result,
             b2_import_result=b2_import_result,
             message=message,
+            profile=profile,
         )
     except Exception as exc:
         if current_result is None:
             try:
-                current_result = preview_ne_to_yamato_conversion(preview_limit=30)
+                current_result = preview_ne_to_yamato_conversion(preview_limit=30, profile=profile)
             except Exception:
                 pass
         # 途中で止まった場合、印刷済みへ進んだ伝票番号をエラー表示へ必ず明示する
@@ -2121,6 +2207,7 @@ async def yamato_run_selected(request: Request):
             b2_import_result=b2_import_result,
             error=error_text,
             status_code=500,
+            profile=profile,
         )
 
 
@@ -2130,6 +2217,7 @@ async def yamato_run_selected_start(request: Request):
     # 重い処理をバックグラウンドジョブ化し、フロントは /progress をポーリングする。
     # ステップは粗い2段階: prepare(受注取得〜CSV作成=チップ①〜⑤) / b2_import(B2取込=チップ⑥)。
     form = await _read_form(request)
+    profile = profile_for_mode(form.get("mode"))
     selected = _yamato_selected_steps(form)
     order_numbers = _parse_order_numbers(form.get("order_nos"))
     csv_file_raw = form.get("csv_file", "").strip()
@@ -2201,6 +2289,7 @@ async def yamato_run_selected_start(request: Request):
                 slow_mo_ms=slow_mo_ms,
                 preview_limit=preview_limit,
                 progress=_prep_progress,
+                profile=profile,
             )
             current_result = prepare_result.conversion
 
@@ -2256,7 +2345,7 @@ async def yamato_run_selected_start(request: Request):
             progress_jobs.update_step(job_id, "b2_import", status="running")
             try:
                 b2_result = import_yamato_b2_csv_sync(
-                    csv_file=Path(csv_file_raw) if csv_file_raw else None,
+                    csv_file=Path(csv_file_raw) if csv_file_raw else resolve_default_b2_csv(profile.output_prefix),
                     check_login=selected["b2_login"] and not selected["b2_import"],
                     open_import_page=False,
                     select_file_dry_run=selected["b2_import"] and not confirm_import,
@@ -2315,15 +2404,16 @@ async def yamato_run_selected_start(request: Request):
         progress_jobs.finish(job_id, message=message, result=result_summary)
 
     job_id = progress_jobs.start(
-        title="ヤマト用CSV作成",
+        title="ヤマト用CSV作成" if profile.key == "yamato" else f"{profile.label}用CSV作成",
         steps=steps,
         worker=worker,
-        workflow="yamato_run_selected",
+        workflow=f"{profile.key}_run_selected",
         metadata={
             "headed": headed,
             "slow_mo_ms": slow_mo_ms,
             "confirm_import": confirm_import,
             "test_restore_print_wait": test_restore_print_wait,
+            "mode": profile.key,
         },
     )
     return {"job_id": job_id}
@@ -2332,6 +2422,7 @@ async def yamato_run_selected_start(request: Request):
 @app.post("/yamato/restore-print-wait", response_class=HTMLResponse)
 async def yamato_restore_print_wait(request: Request):
     form = await _read_form(request)
+    profile = profile_for_mode(form.get("mode"))
     order_numbers = _parse_order_numbers(form.get("order_nos"))
     headed = _form_headed(form)
     execute = _form_bool(form, "execute") or form.get("restore_mode") == "execute"
@@ -2345,17 +2436,18 @@ async def yamato_restore_print_wait(request: Request):
             headless=not headed,
             slow_mo_ms=slow_mo_ms,
         )
-        current_result = preview_ne_to_yamato_conversion(preview_limit=30)
+        current_result = preview_ne_to_yamato_conversion(preview_limit=30, profile=profile)
         return _yamato_response(
             request,
             result=current_result,
             restore_result=restore_result,
             message="納品書印刷待ちへの復旧を実行しました。" if execute else "復旧対象を確認しました。",
+            profile=profile,
         )
     except Exception as exc:
         current_result = None
         try:
-            current_result = preview_ne_to_yamato_conversion(preview_limit=30)
+            current_result = preview_ne_to_yamato_conversion(preview_limit=30, profile=profile)
         except Exception:
             pass
         return _yamato_response(
@@ -2363,6 +2455,7 @@ async def yamato_restore_print_wait(request: Request):
             result=current_result,
             error=str(exc),
             status_code=500,
+            profile=profile,
         )
 
 
@@ -2448,11 +2541,12 @@ async def yamato_b2_open_start(request: Request):
     # ⑥「B2取込ブラウザを開く」の非同期版。実Chromeを独立起動し（印刷まで開いたまま）、
     # automate=on のときのみ CDP接続で取込まで自動を試みる（縮退時は手動フォールバック）。
     form = await _read_form(request)
+    profile = profile_for_mode(form.get("mode"))
     automate = _form_bool(form, "automate")
     csv_file_raw = form.get("csv_file", "").strip()
-    csv_path = Path(csv_file_raw) if csv_file_raw else resolve_default_b2_csv()
+    csv_path = Path(csv_file_raw) if csv_file_raw else resolve_default_b2_csv(profile.output_prefix)
     if csv_path is None or not Path(csv_path).is_file():
-        return PlainTextResponse("先にヤマト用CSVを作成してください。", status_code=400)
+        return PlainTextResponse(f"先に{profile.label}用CSVを作成してください。", status_code=400)
     csv_path = Path(csv_path)
 
     steps: list[tuple[str, str]] = [("open", "B2ブラウザを開く")]
@@ -2526,24 +2620,25 @@ async def yamato_b2_open_start(request: Request):
         title="B2取込ブラウザ",
         steps=steps,
         worker=worker,
-        workflow="yamato_b2_open",
-        metadata={"automate": automate},
+        workflow=f"{profile.key}_b2_open",
+        metadata={"automate": automate, "mode": profile.key},
     )
     return {"job_id": job_id}
 
 
 @app.post("/yamato/b2-open", response_class=HTMLResponse)
 async def yamato_b2_open(request: Request):
-    # JS無効時のフォールバック（モードA=手動のみ）。実Chromeを開いて /yamato へ戻る。
+    # JS無効時のフォールバック（モードA=手動のみ）。実Chromeを開いて元のカードへ戻る。
     form = await _read_form(request)
+    profile = profile_for_mode(form.get("mode"))
     csv_file_raw = form.get("csv_file", "").strip()
-    csv_path = Path(csv_file_raw) if csv_file_raw else resolve_default_b2_csv()
+    csv_path = Path(csv_file_raw) if csv_file_raw else resolve_default_b2_csv(profile.output_prefix)
     if csv_path is not None and Path(csv_path).is_file():
         try:
             await run_in_threadpool(b2_chrome.launch, csv_path=Path(csv_path), enable_cdp=False)
         except Exception:
             pass
-    return RedirectResponse(url="/yamato", status_code=303)
+    return RedirectResponse(url="/nekopos" if profile.key == "nekopos" else "/yamato", status_code=303)
 
 
 @app.post("/yamato/run-full/start")
@@ -2551,6 +2646,7 @@ async def yamato_run_full_start(request: Request):
     # 「CSV作成からB2取込まで一括実行」: prepare（NE取得〜B2取込CSV作成）と
     # 実ChromeでのB2取込（b2-open の automate 相当）を 1 ジョブで続けて実行する。
     form = await _read_form(request)
+    profile = profile_for_mode(form.get("mode"))
     headed = _form_headed(form)
     verify_invoice_statuses = _form_bool(form, "verify_invoice_statuses")
     test_restore_print_wait = _form_bool(form, "test_restore_print_wait")
@@ -2593,6 +2689,7 @@ async def yamato_run_full_start(request: Request):
             slow_mo_ms=slow_mo_ms,
             preview_limit=preview_limit,
             progress=_prep_progress,
+            profile=profile,
         )
         conversion = prepare_result.conversion
 
@@ -2733,15 +2830,16 @@ async def yamato_run_full_start(request: Request):
             )
 
     job_id = progress_jobs.start(
-        title="ヤマト伝票 一括実行",
+        title=f"{profile.label} 一括実行",
         steps=steps,
         worker=worker,
-        workflow="yamato_run_full",
+        workflow=f"{profile.key}_run_full",
         metadata={
             "headed": headed,
             "slow_mo_ms": slow_mo_ms,
             "test_restore_print_wait": test_restore_print_wait,
             "verify_invoice_statuses": verify_invoice_statuses,
+            "mode": profile.key,
         },
     )
     return {"job_id": job_id}
@@ -2749,16 +2847,573 @@ async def yamato_run_full_start(request: Request):
 
 @app.post("/yamato/run-full", response_class=HTMLResponse)
 async def yamato_run_full(request: Request):
-    # JS無効時のフォールバック: 同じ一括ジョブを開始して /yamato へ戻る（進捗は /jobs で確認できる）。
+    # JS無効時のフォールバック: 同じ一括ジョブを開始して元のカードへ戻る（進捗は /jobs で確認できる）。
+    form = await _read_form(request)
+    profile = profile_for_mode(form.get("mode"))
     await yamato_run_full_start(request)
-    return RedirectResponse(url="/yamato", status_code=303)
+    return RedirectResponse(url="/nekopos" if profile.key == "nekopos" else "/yamato", status_code=303)
 
 
 @app.post("/yamato/b2-close", response_class=HTMLResponse)
 async def yamato_b2_close(request: Request):
     # 印刷完了後にB2ブラウザを閉じる。
+    form = await _read_form(request)
+    profile = profile_for_mode(form.get("mode"))
     await run_in_threadpool(b2_chrome.close)
-    return RedirectResponse(url="/yamato", status_code=303)
+    return RedirectResponse(url="/nekopos" if profile.key == "nekopos" else "/yamato", status_code=303)
+
+
+def _access_analytics_tab(request: Request) -> str:
+    tab = request.query_params.get("tab", "rakuten")
+    return tab if tab in {"rakuten", "yahoo"} else "rakuten"
+
+
+def _billing_tab(request: Request) -> str:
+    tab = request.query_params.get("tab", "yahoo")
+    return tab if tab in {"yahoo", "rakuten"} else "yahoo"
+
+
+def _default_target_date() -> str:
+    return (date.today() - timedelta(days=1)).isoformat()
+
+
+def _default_target_month() -> str:
+    previous_month = date.today().replace(day=1) - timedelta(days=1)
+    return previous_month.strftime("%Y-%m")
+
+
+def _parse_date_range(form: dict[str, str]) -> tuple[date, date]:
+    default = _default_target_date()
+    start_raw = form.get("period_start", "").strip() or default
+    end_raw = form.get("period_end", "").strip() or default
+    try:
+        period_start = date.fromisoformat(start_raw)
+        period_end = date.fromisoformat(end_raw)
+    except ValueError as exc:
+        raise ValueError("開始日・終了日は YYYY-MM-DD で指定してください。") from exc
+    if period_start.isoformat() != start_raw or period_end.isoformat() != end_raw:
+        raise ValueError("開始日・終了日は YYYY-MM-DD で指定してください。")
+    if period_start > period_end:
+        raise ValueError("開始日は終了日以前にしてください。")
+    if (period_end - period_start).days > 365:
+        raise ValueError("一度に指定できる期間は366日以内です。")
+    return period_start, period_end
+
+
+def _iter_dates(period_start: date, period_end: date):
+    current = period_start
+    while current <= period_end:
+        yield current
+        if current == period_end:
+            break
+        current += timedelta(days=1)
+
+
+def _browser_mode(form: dict[str, str]) -> str:
+    value = form.get("browser_mode", "background")
+    return value if value in {"background", "front"} else "background"
+
+
+def _mark_steps_failed(job_id: str, keys: tuple[str, ...]) -> None:
+    for key in keys:
+        progress_jobs.update_step(job_id, key, status="failed")
+
+
+def _zip_artifacts(
+    artifacts: list[tuple[str, Path]],
+    *,
+    download_name: str,
+) -> Response:
+    if not artifacts:
+        return PlainTextResponse("一括ダウンロード対象が見つかりません。", status_code=404)
+    output = io.BytesIO()
+    used_names: set[str] = set()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for requested_name, path in artifacts:
+            name = Path(requested_name).name or path.name
+            if name in used_names:
+                name = f"{Path(name).stem}_{len(used_names) + 1}{Path(name).suffix}"
+            used_names.add(name)
+            archive.write(path, arcname=name)
+    return Response(
+        output.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{download_name}"'},
+    )
+
+
+@app.get("/access-analytics", response_class=HTMLResponse)
+def access_analytics_page(request: Request):
+    active_tab = _access_analytics_tab(request)
+    return templates.TemplateResponse(
+        "access_analytics.html",
+        {
+            "request": request,
+            "active_tab": active_tab,
+            "default_target_date": _default_target_date(),
+            "browser_mode": "background",
+            "defer_preview": True,
+            "result": None,
+            "error": None,
+        },
+    )
+
+
+@app.get("/access-analytics/preview", response_class=HTMLResponse)
+def access_analytics_preview(request: Request):
+    active_tab = _access_analytics_tab(request)
+    try:
+        result = read_access_analytics_preview(active_tab)
+        preview_error = None
+    except Exception as exc:
+        result = None
+        preview_error = str(exc)
+    return templates.TemplateResponse(
+        "_access_analytics_results.html",
+        {
+            "request": request,
+            "active_tab": active_tab,
+            "result": result,
+            "preview_error": preview_error,
+        },
+    )
+
+
+@app.post("/access-analytics/rakuten/start")
+async def access_analytics_rakuten_start(request: Request):
+    form = await _read_form(request)
+    try:
+        period_start, period_end = _parse_date_range(form)
+    except ValueError as exc:
+        return PlainTextResponse(str(exc), status_code=400)
+    browser_mode = _browser_mode(form)
+    headless = browser_mode != "front"
+    slow_mo_ms = 150 if not headless else 0
+
+    def worker(job_id: str) -> None:
+        active_keys = ("login_check", "fetch")
+        progress_jobs.update_step(job_id, "login_check", status="running")
+        progress_jobs.update_step(job_id, "fetch", status="running")
+        results = []
+        try:
+            for target in _iter_dates(period_start, period_end):
+                if progress_jobs.is_cancel_requested(job_id):
+                    raise JobCancelled()
+                results.append(
+                    download_rakuten_device_access_sync(
+                        execute=True,
+                        target_date=target,
+                        include_all=False,
+                        headless=headless,
+                        slow_mo_ms=slow_mo_ms,
+                    )
+                )
+                if progress_jobs.is_cancel_requested(job_id):
+                    raise JobCancelled()
+        except Exception:
+            _mark_steps_failed(job_id, active_keys)
+            raise
+        progress_jobs.update_step(job_id, "login_check", status="completed")
+        progress_jobs.update_step(job_id, "fetch", status="completed")
+        progress_jobs.update_step(job_id, "validate_save", status="running")
+        file_count = sum(len(result.csv_files) for result in results)
+        row_count = sum(
+            item.row_count for result in results for item in result.csv_files
+        )
+        try:
+            record_access_analytics_batch(
+                mall="rakuten",
+                batch_id=f"job-{job_id}",
+                target_label=f"{period_start.isoformat()}..{period_end.isoformat()}",
+                artifacts=[
+                    (item.downloaded_file.name, item.source_sha256)
+                    for result in results
+                    for item in result.csv_files
+                ],
+            )
+        except Exception:
+            progress_jobs.update_step(job_id, "validate_save", status="failed")
+            raise
+        sha8 = [
+            item.source_sha256[:8]
+            for result in results
+            for item in result.csv_files
+        ]
+        progress_jobs.update_step(
+            job_id,
+            "validate_save",
+            status="completed",
+            detail=f"{file_count}件を検証・保存しました。",
+        )
+        progress_jobs.finish(
+            job_id,
+            message=f"楽天アクセス解析CSVを{file_count}件保存しました。",
+            result={
+                "file_count": file_count,
+                "row_count": row_count,
+                "sha8": sha8,
+            },
+        )
+
+    job_id = progress_jobs.start(
+        title="楽天市場 アクセス解析取得",
+        steps=[
+            ("login_check", "ログイン確認"),
+            ("fetch", "3端末のCSV取得"),
+            ("validate_save", "検証・保存"),
+        ],
+        worker=worker,
+        workflow="access_analytics_rakuten",
+        metadata={
+            "period_start": period_start.isoformat(),
+            "period_end": period_end.isoformat(),
+            "browser_mode": browser_mode,
+        },
+    )
+    return {"job_id": job_id}
+
+
+@app.post("/access-analytics/yahoo/start")
+async def access_analytics_yahoo_start(request: Request):
+    form = await _read_form(request)
+    try:
+        period_start, period_end = _parse_date_range(form)
+    except ValueError as exc:
+        return PlainTextResponse(str(exc), status_code=400)
+    browser_mode = _browser_mode(form)
+    headless = browser_mode != "front"
+    slow_mo_ms = 150 if not headless else 0
+
+    def worker(job_id: str) -> None:
+        active_keys = ("login_check", "fetch_product", "fetch_overall")
+        for key in active_keys:
+            progress_jobs.update_step(job_id, key, status="running")
+        try:
+            if progress_jobs.is_cancel_requested(job_id):
+                raise JobCancelled()
+            result = download_yahoo_access_reports_sync(
+                execute=True,
+                period_start=period_start,
+                period_end=period_end,
+                headless=headless,
+                slow_mo_ms=slow_mo_ms,
+            )
+            if progress_jobs.is_cancel_requested(job_id):
+                raise JobCancelled()
+        except Exception:
+            _mark_steps_failed(job_id, active_keys)
+            raise
+        for key in active_keys:
+            progress_jobs.update_step(job_id, key, status="completed")
+        progress_jobs.update_step(job_id, "validate_save", status="running")
+        all_files = ([result.product] if result.product else []) + list(result.overall)
+        progress_jobs.update_step(
+            job_id,
+            "validate_save",
+            status="completed",
+            detail=f"{len(all_files)}件を検証・保存しました。",
+        )
+        progress_jobs.finish(
+            job_id,
+            message=f"Yahoo!アクセス解析CSVを{len(all_files)}件保存しました。",
+            result={
+                "file_count": len(all_files),
+                "row_count": sum(item.row_count for item in all_files),
+                "sha8": [item.source_sha256[:8] for item in all_files],
+                "warnings": list(result.warnings),
+            },
+        )
+
+    job_id = progress_jobs.start(
+        title="Yahoo! アクセス解析取得",
+        steps=[
+            ("login_check", "ログイン確認"),
+            ("fetch_product", "商品分析CSVの取得"),
+            ("fetch_overall", "全体分析4件の取得"),
+            ("validate_save", "検証・保存"),
+        ],
+        worker=worker,
+        workflow="access_analytics_yahoo",
+        metadata={
+            "period_start": period_start.isoformat(),
+            "period_end": period_end.isoformat(),
+            "browser_mode": browser_mode,
+        },
+    )
+    return {"job_id": job_id}
+
+
+@app.post("/access-analytics/rakuten")
+async def access_analytics_rakuten_fallback(request: Request):
+    started = await access_analytics_rakuten_start(request)
+    if isinstance(started, Response):
+        return started
+    return RedirectResponse(url="/access-analytics", status_code=303)
+
+
+@app.post("/access-analytics/yahoo")
+async def access_analytics_yahoo_fallback(request: Request):
+    started = await access_analytics_yahoo_start(request)
+    if isinstance(started, Response):
+        return started
+    return RedirectResponse(url="/access-analytics?tab=yahoo", status_code=303)
+
+
+@app.get("/billing", response_class=HTMLResponse)
+def billing_page(request: Request):
+    active_tab = _billing_tab(request)
+    return templates.TemplateResponse(
+        "billing.html",
+        {
+            "request": request,
+            "active_tab": active_tab,
+            "default_target_month": _default_target_month(),
+            "defer_preview": True,
+            "result": None,
+            "error": None,
+        },
+    )
+
+
+@app.get("/billing/preview", response_class=HTMLResponse)
+def billing_preview(request: Request):
+    active_tab = _billing_tab(request)
+    try:
+        result = read_billing_preview(active_tab)
+        preview_error = None
+    except Exception as exc:
+        result = None
+        preview_error = str(exc)
+    return templates.TemplateResponse(
+        "_billing_results.html",
+        {
+            "request": request,
+            "active_tab": active_tab,
+            "result": result,
+            "preview_error": preview_error,
+        },
+    )
+
+
+@app.post("/billing/yahoo/start")
+async def billing_yahoo_start(request: Request):
+    values = await _read_form_values(request)
+    form = {key: entries[-1] if entries else "" for key, entries in values.items()}
+    target_month = form.get("target_month", "").strip() or _default_target_month()
+    try:
+        parsed_month = date.fromisoformat(target_month + "-01")
+    except ValueError:
+        return PlainTextResponse("対象年月は YYYY-MM で指定してください。", status_code=400)
+    if parsed_month.strftime("%Y-%m") != target_month:
+        return PlainTextResponse("対象年月は YYYY-MM で指定してください。", status_code=400)
+    allowed_types = {"settlement", "billing", "receipt"}
+    raw_types = [value for value in values.get("types", []) if value]
+    invalid_types = sorted(set(raw_types) - allowed_types)
+    if invalid_types:
+        return PlainTextResponse("帳票種別の指定が不正です。", status_code=400)
+    requested_types = tuple(
+        value for value in raw_types if value in allowed_types
+    )
+    if not requested_types:
+        requested_types = ("billing", "receipt", "settlement")
+    final_only = _form_bool(form, "final_only")
+
+    def worker(job_id: str) -> None:
+        active_keys = ("login_check", "select_month", "fetch")
+        for key in active_keys:
+            progress_jobs.update_step(job_id, key, status="running")
+        try:
+            if progress_jobs.is_cancel_requested(job_id):
+                raise JobCancelled()
+            result = download_yahoo_statements_sync(
+                execute=True,
+                target_month=target_month,
+                types=requested_types,
+                final_only=final_only,
+            )
+            if progress_jobs.is_cancel_requested(job_id):
+                raise JobCancelled()
+        except Exception:
+            _mark_steps_failed(job_id, active_keys)
+            raise
+        for key in active_keys:
+            progress_jobs.update_step(job_id, key, status="completed")
+        progress_jobs.update_step(job_id, "validate_save", status="running")
+        progress_jobs.update_step(
+            job_id,
+            "validate_save",
+            status="completed",
+            detail=f"{len(result.files)}件を検証・保存しました。",
+        )
+        progress_jobs.finish(
+            job_id,
+            message=(
+                f"Yahoo!請求関連CSVを{len(result.files)}件保存しました。"
+                if result.files
+                else "対象帳票は未確定またはデータなしのため保存していません。"
+            ),
+            result={
+                "file_count": len(result.files),
+                "row_count": sum(item.row_count for item in result.files),
+                "states": sorted({item.statement_state for item in result.files}),
+                "sha8": [item.source_sha256[:8] for item in result.files],
+                "warnings": list(result.warnings),
+            },
+        )
+
+    job_id = progress_jobs.start(
+        title="Yahoo! 請求関連取得",
+        steps=[
+            ("login_check", "ログイン確認"),
+            ("select_month", "対象月選択・確定状態判定"),
+            ("fetch", "帳票ダウンロード"),
+            ("validate_save", "検証・保存"),
+        ],
+        worker=worker,
+        workflow="billing_statements_yahoo",
+        metadata={
+            "target_month": target_month,
+            "types": list(requested_types),
+            "final_only": final_only,
+        },
+    )
+    return {"job_id": job_id}
+
+
+@app.post("/billing/rakuten/start")
+async def billing_rakuten_start(request: Request):
+    form = await _read_form(request)
+    screen = form.get("screen", "settlement_result")
+    scope = form.get("scope", "latest")
+    issue_date = form.get("issue_date", "").strip() or None
+    if screen not in {"settlement_result", "billing_check"}:
+        return PlainTextResponse("画面の指定が不正です。", status_code=400)
+    if scope not in {"latest", "date", "all"}:
+        return PlainTextResponse("取得範囲の指定が不正です。", status_code=400)
+    if scope == "date" and not issue_date:
+        return PlainTextResponse("発行日を指定してください。", status_code=400)
+    if issue_date:
+        try:
+            parsed_issue_date = date.fromisoformat(issue_date)
+        except ValueError:
+            return PlainTextResponse("発行日は YYYY-MM-DD で指定してください。", status_code=400)
+        if parsed_issue_date.isoformat() != issue_date:
+            return PlainTextResponse("発行日は YYYY-MM-DD で指定してください。", status_code=400)
+
+    def worker(job_id: str) -> None:
+        active_keys = ("login_check", "list_settlements", "fetch")
+        for key in active_keys:
+            progress_jobs.update_step(job_id, key, status="running")
+        try:
+            if progress_jobs.is_cancel_requested(job_id):
+                raise JobCancelled()
+            result = download_billpay_settlement_sync(
+                execute=True,
+                screen=screen,
+                scope=scope,
+                issue_date=issue_date,
+            )
+            if progress_jobs.is_cancel_requested(job_id):
+                raise JobCancelled()
+        except Exception:
+            _mark_steps_failed(job_id, active_keys)
+            raise
+        for key in active_keys:
+            progress_jobs.update_step(job_id, key, status="completed")
+        progress_jobs.update_step(job_id, "validate_save", status="running")
+        progress_jobs.update_step(
+            job_id,
+            "validate_save",
+            status="completed",
+            detail=f"{len(result.documents)}件を検証・保存しました。",
+        )
+        progress_jobs.finish(
+            job_id,
+            message=f"楽天BillPay帳票を{len(result.documents)}件保存しました。",
+            result={
+                "document_count": len(result.documents),
+                "document_types": sorted(
+                    {item.document_type for item in result.documents}
+                ),
+                "validated_count": sum(
+                    1 for item in result.documents if item.validated
+                ),
+                "sha8": [item.source_sha256[:8] for item in result.documents],
+                "warnings": list(result.warnings),
+            },
+        )
+
+    job_id = progress_jobs.start(
+        title="楽天BillPay 請求関連取得",
+        steps=[
+            ("login_check", "ログイン確認"),
+            ("list_settlements", "18か月表示・精算回列挙"),
+            ("fetch", "帳票ダウンロード"),
+            ("validate_save", "検証・保存"),
+        ],
+        worker=worker,
+        workflow="billing_statements_rakuten",
+        metadata={
+            "screen": screen,
+            "scope": scope,
+            "issue_date": issue_date,
+        },
+    )
+    return {"job_id": job_id}
+
+
+@app.post("/billing/yahoo")
+async def billing_yahoo_fallback(request: Request):
+    started = await billing_yahoo_start(request)
+    if isinstance(started, Response):
+        return started
+    return RedirectResponse(url="/billing", status_code=303)
+
+
+@app.post("/billing/rakuten")
+async def billing_rakuten_fallback(request: Request):
+    started = await billing_rakuten_start(request)
+    if isinstance(started, Response):
+        return started
+    return RedirectResponse(url="/billing?tab=rakuten", status_code=303)
+
+
+@app.get("/access-analytics/download/{mall}/{artifact_id}")
+def access_analytics_download(mall: str, artifact_id: str):
+    if mall not in {"rakuten", "yahoo"}:
+        return PlainTextResponse("取得先の指定が不正です。", status_code=404)
+    if artifact_id == "all":
+        return _zip_artifacts(
+            latest_access_analytics_artifact_paths(mall),
+            download_name=f"access_analytics_{mall}_latest.zip",
+        )
+    belongs = any(
+        record.get("artifact_id") == artifact_id and record.get("mall") == mall
+        for record in read_access_analytics_manifest()
+    )
+    path = resolve_access_analytics_artifact_path(artifact_id) if belongs else None
+    if path is None:
+        return PlainTextResponse("ファイルが見つかりません。", status_code=404)
+    return FileResponse(path, filename=path.name)
+
+
+@app.get("/billing/download/{mall}/{artifact_id}")
+def billing_download(mall: str, artifact_id: str):
+    if mall not in {"rakuten", "yahoo"}:
+        return PlainTextResponse("取得先の指定が不正です。", status_code=404)
+    if artifact_id == "all":
+        return _zip_artifacts(
+            latest_billing_artifact_paths(mall),
+            download_name=f"billing_{mall}_latest.zip",
+        )
+    belongs = any(
+        record.get("artifact_id") == artifact_id and record.get("mall") == mall
+        for record in read_billing_manifest()
+    )
+    path = resolve_billing_artifact_path(artifact_id) if belongs else None
+    if path is None:
+        return PlainTextResponse("ファイルが見つかりません。", status_code=404)
+    return FileResponse(path, filename=path.name)
 
 
 def _log_relpath(raw: str | None) -> str | None:

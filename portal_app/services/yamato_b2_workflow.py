@@ -28,6 +28,7 @@ from portal_app.services.yamato_conversion import (
     create_ne_to_yamato_csv,
     preview_ne_to_yamato_conversion,
 )
+from portal_app.services.yamato_flow_profile import YAMATO_PROFILE, YamatoFlowProfile
 
 
 YAMATO_B2_AUDIT_LOG_DIR = APP_ROOT / "logs" / "next_engine_yamato"
@@ -135,6 +136,7 @@ def prepare_yamato_b2_sync(
     slow_mo_ms: int,
     preview_limit: int,
     progress=None,
+    profile: YamatoFlowProfile = YAMATO_PROFILE,
 ) -> YamatoB2PreparationResult:
     if execute_downloads:
         fetch_next_engine = True
@@ -142,6 +144,10 @@ def prepare_yamato_b2_sync(
         check_invoices = True
     if execute_custom_shipping:
         check_custom_shipping = True
+    # 個別セッション経路（verify_invoice_statuses）はモジュール関数がヤマト既定の
+    # プロファイルでクライアントを作るため、ネコポス等では共有セッション経路に固定する。
+    if profile.key != YAMATO_PROFILE.key:
+        verify_invoice_statuses = False
 
     downloads_kwargs = dict(
         fetch_next_engine=fetch_next_engine,
@@ -156,6 +162,7 @@ def prepare_yamato_b2_sync(
         headed=headed,
         slow_mo_ms=slow_mo_ms,
         progress=progress,
+        profile=profile,
     )
 
     # 通常は共有セッション（1ブラウザ/1ログイン/メイン機能1回）で全取得を実行し、無駄な開閉を無くす。
@@ -182,6 +189,7 @@ def prepare_yamato_b2_sync(
             execute_custom_shipping=execute_custom_shipping,
             write_conversion=write_conversion,
             preview_limit=preview_limit,
+            profile=profile,
         )
     except Exception as exc:
         _emit(progress, "conversion", "failed", (str(exc).strip() or type(exc).__name__)[:140])
@@ -236,6 +244,7 @@ def _run_downloads_legacy(
     headed: bool,
     slow_mo_ms: int,
     progress=None,
+    profile: YamatoFlowProfile = YAMATO_PROFILE,
 ) -> tuple[
     YamatoBuyerDownloadResult | None,
     YamatoProductDownloadResult | None,
@@ -334,6 +343,7 @@ async def _run_downloads_shared(
     headed: bool,
     slow_mo_ms: int,
     progress=None,
+    profile: YamatoFlowProfile = YAMATO_PROFILE,
 ) -> tuple[
     YamatoBuyerDownloadResult | None,
     YamatoProductDownloadResult | None,
@@ -349,7 +359,7 @@ async def _run_downloads_shared(
     buyer = product = invoice = custom_shipping = None
     workflow_warnings: list[str] = []
 
-    client = NextEngineYamatoClient(headless=not headed, slow_mo_ms=slow_mo_ms)
+    client = NextEngineYamatoClient(headless=not headed, slow_mo_ms=slow_mo_ms, profile=profile)
     async with client.open_shared_session():
         # ① NEデータ取得（購入者＋商品）
         if fetch_next_engine:
@@ -439,6 +449,7 @@ def _finalize_prepare(
     execute_custom_shipping: bool,
     write_conversion: bool,
     preview_limit: int,
+    profile: YamatoFlowProfile = YAMATO_PROFILE,
 ) -> YamatoB2PreparationResult:
     source_csv = custom_shipping.downloaded_file if custom_shipping and custom_shipping.downloaded_file else None
     conversion_write = write_conversion
@@ -447,9 +458,11 @@ def _finalize_prepare(
     if workflow_warnings:
         conversion_write = False
     conversion = (
-        create_ne_to_yamato_csv(source_csv=source_csv, preview_limit=preview_limit)
+        create_ne_to_yamato_csv(source_csv=source_csv, preview_limit=preview_limit, profile=profile)
         if conversion_write
-        else preview_ne_to_yamato_conversion(source_csv=source_csv, preview_limit=preview_limit)
+        else preview_ne_to_yamato_conversion(
+            source_csv=source_csv, preview_limit=preview_limit, profile=profile
+        )
     )
 
     warnings = workflow_warnings + _consistency_warnings(

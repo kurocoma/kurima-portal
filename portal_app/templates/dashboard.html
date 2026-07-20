@@ -34,6 +34,14 @@
     <span class="tool-open">開く<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#147f9f" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg></span>
   </a>
 
+  <a class="tool-card" href="/nekopos">
+    <span class="tool-icon"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="#147f9f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M3 11h18"/><path d="M12 7V4"/><path d="M8 4h8"/></svg></span>
+    <span class="tool-name">ネコポス</span>
+    <span class="tool-desc">オリジナルステータス「ネコポス」の受注から、B2の取込データを作成します。</span>
+    <span class="tool-meta">NE取得・住所補正・送り状種別7・B2取込</span>
+    <span class="tool-open">開く<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#147f9f" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg></span>
+  </a>
+
   <a class="tool-card" href="/clickpost">
     <span class="tool-icon"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="#147f9f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3.5 7l8.5 6 8.5-6"/></svg></span>
     <span class="tool-name">クリックポスト</span>
@@ -42,11 +50,43 @@
     <span class="tool-open">開く<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#147f9f" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg></span>
   </a>
 
+  <a class="tool-card" href="/letterpack-tracking">
+    <span class="tool-icon"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="#147f9f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5v14"/><path d="M7 5v14"/><path d="M11 5v14"/><path d="M15 5v9"/><path d="M19 5v9"/><path d="M15 18h6"/></svg></span>
+    <span class="tool-name">レターパック配送番号反映</span>
+    <span class="tool-desc">納品書と送り状を交互スキャンし、配送情報紐づけ用CSVを作成します。</span>
+    <span class="tool-meta">1欄自動判定スキャン・Excel互換CSV・出荷確定連携</span>
+    <span class="tool-open">開く<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#147f9f" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg></span>
+  </a>
+
   <a class="tool-card" href="/shipment-confirmation">
     <span class="tool-icon"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="#147f9f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h13v4"/><path d="M3 7v10h18V11h-5"/><path d="M7 21v-4"/><path d="M9 3v4"/><path d="M9 12l2 2 4-4"/></svg></span>
     <span class="tool-name">出荷確定</span>
     <span class="tool-desc">納品書バーコードをスキャンし、出荷確定CSVを作成してNEへ反映します。</span>
     <span class="tool-meta">バーコード照合・出荷確定CSV作成・NE反映</span>
+    <span class="tool-open">開く<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#147f9f" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg></span>
+  </a>
+
+  <a class="tool-card" href="/access-analytics">
+    <span class="tool-icon"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="#147f9f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10"/><path d="M10 20V4"/><path d="M16 20v-7"/><path d="M22 20H2"/></svg></span>
+    <span class="tool-name">アクセス解析取得</span>
+    <span class="tool-desc">楽天市場・Yahoo!から、商品別・デバイス別のアクセス解析CSVを取得します。</span>
+    <span class="tool-meta">楽天3端末・Yahoo!商品分析／全体分析</span>
+    <span class="tool-open">開く<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#147f9f" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg></span>
+  </a>
+
+  <a class="tool-card" href="/billing">
+    <span class="tool-icon"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="#147f9f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2h12v20l-3-2-3 2-3-2-3 2z"/><path d="M9 7h6M9 11h6M9 15h4"/></svg></span>
+    <span class="tool-name">請求関連取得</span>
+    <span class="tool-desc">Yahoo!の各明細と楽天BillPayの精算データを取得・検証します。</span>
+    <span class="tool-meta">精算・請求・受取明細／BillPay帳票</span>
+    <span class="tool-open">開く<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#147f9f" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg></span>
+  </a>
+
+  <a class="tool-card" href="/price-calc">
+    <span class="tool-icon"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="#147f9f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2.5" width="14" height="19" rx="2"/><path d="M8.5 6.5h7"/><path d="M9 11h.01M12 11h.01M15 11h.01M9 14.5h.01M12 14.5h.01M15 14.5h.01M9 18h.01M12 18h.01M15 18h.01"/></svg></span>
+    <span class="tool-name">税込・割引価格計算</span>
+    <span class="tool-desc">楽天RMSに登録するセットSKUの割引後税抜価格を計算します。</span>
+    <span class="tool-meta">税額切捨て逆算・8%/10%・CSV出力</span>
     <span class="tool-open">開く<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#147f9f" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg></span>
   </a>
 </div>

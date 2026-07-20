@@ -19,8 +19,13 @@
           <a class="appnav-link {% if nav_path == '/' %}is-active{% endif %}" href="/">ポータル</a>
           <a class="appnav-link {% if nav_path.startswith('/inventory') %}is-active{% endif %}" href="/inventory">在庫明細確認</a>
           <a class="appnav-link {% if nav_path.startswith('/yamato') %}is-active{% endif %}" href="/yamato">ヤマト伝票</a>
+          <a class="appnav-link {% if nav_path.startswith('/nekopos') %}is-active{% endif %}" href="/nekopos">ネコポス</a>
           <a class="appnav-link {% if nav_path.startswith('/clickpost') %}is-active{% endif %}" href="/clickpost">クリックポスト</a>
+          <a class="appnav-link {% if nav_path.startswith('/letterpack-tracking') %}is-active{% endif %}" href="/letterpack-tracking">LP番号反映</a>
           <a class="appnav-link {% if nav_path.startswith('/shipment-confirmation') %}is-active{% endif %}" href="/shipment-confirmation">出荷確定</a>
+          <a class="appnav-link {% if nav_path.startswith('/access-analytics') %}is-active{% endif %}" href="/access-analytics">アクセス解析</a>
+          <a class="appnav-link {% if nav_path.startswith('/billing') %}is-active{% endif %}" href="/billing">請求関連</a>
+          <a class="appnav-link {% if nav_path.startswith('/price-calc') %}is-active{% endif %}" href="/price-calc">価格計算</a>
           <a class="appnav-link {% if nav_path.startswith('/jobs') %}is-active{% endif %}" href="/jobs">実行履歴<span id="nav-running-badge" class="nav-badge" title="実行中のジョブ" hidden></span></a>
           <a class="appnav-link {% if nav_path.startswith('/logs') %}is-active{% endif %}" href="/logs">ログ</a>
           <a class="appnav-link {% if nav_path.startswith('/settings') %}is-active{% endif %}" href="/settings">設定</a>

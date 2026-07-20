@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+{% block title %}税込・割引価格計算 - くりまポータルツール{% endblock %}
+{% block content %}
+<style>
+  /* 税込・割引価格計算ページ専用スタイル（このページ以外に影響させないため局所定義） */
+  /* 列数が多いため、このページに限り本文幅を広げる（style はこのページでのみ読み込まれる） */
+  main.page { max-width: 1280px; }
+  .pc-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+  .pc-table { min-width: 1080px; }
+  .pc-table td.pc-cell { padding: 9px 10px; vertical-align: top; }
+  .pc-table th { padding: 11px 10px; }
+  .pc-th-note { display: block; font-weight: 400; font-size: 10.5px; color: var(--muted-3); }
+  .pc-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .pc-col-product { min-width: 150px; }
+  .pc-input-product { width: 100%; min-width: 140px; }
+  .pc-input-unitnet { width: 110px; text-align: right; }
+  .pc-input-quantity { width: 64px; text-align: right; }
+  .pc-input-tax { min-width: 76px; }
+  .pc-input-discount { width: 76px; text-align: right; }
+  .pc-err { color: var(--error); font-size: 11.5px; margin-top: 4px; max-width: 190px; }
+  .pc-empty { color: var(--muted-3); }
+  /* RMS登録値（割引後税抜価格）の強調（§7.3） */
+  .pc-rms { font-weight: 700; color: var(--primary-deep); background: var(--primary-bg-3); }
+  .pc-col-ops { white-space: nowrap; }
+  .pc-col-ops .btn { margin-right: 5px; padding: 6px 10px; font-size: 12px; border-radius: 7px; }
+  .pc-col-ops .btn:last-child { margin-right: 0; }
+  .pc-detail-row td { padding: 0 10px 10px; border-bottom: 1px solid var(--line-soft); background: var(--opt-bg); }
+  .pc-detail-line { font-size: 12px; color: var(--muted); margin-right: 12px; }
+  .pc-detail-warn { display: inline-block; font-size: 12px; font-weight: 700; color: var(--warn); margin-right: 12px; }
+  .pc-detail-error { color: var(--error); }
+  .pc-rowcopy { font-size: 12px; }
+  /* 商品名列と操作列の固定表示（§7.3。横スクロール時） */
+  @media (min-width: 761px) {
+    .pc-table th:first-child, .pc-table td.pc-col-product {
+      position: sticky; left: 0; background: var(--surface); z-index: 2;
+    }
+    .pc-table thead th:first-child { background: var(--chip-bg); }
+    .pc-table th:last-child, .pc-table td.pc-col-ops {
+      position: sticky; right: 0; background: var(--surface); z-index: 2;
+      border-left: 1px solid var(--line-soft);
+    }
+    .pc-table thead th:last-child { background: var(--chip-bg); }
+  }
+  /* スマートフォン: 1商品を1カードとして縦表示（§7.3） */
+  @media (max-width: 760px) {
+    .pc-table { min-width: 0; width: 100%; }
+    .pc-table thead { display: none; }
+    .pc-table tr.pc-row { display: block; padding: 12px 12px 4px; border-bottom: 1px solid var(--line); }
+    .pc-table tr.pc-row td.pc-cell { display: flex; align-items: center; gap: 10px; border-bottom: 0; padding: 5px 0; }
+    .pc-table tr.pc-row td.pc-cell::before {
+      content: attr(data-label); flex: 0 0 84px; font-size: 12px; font-weight: 600; color: var(--muted-2);
+    }
+    .pc-table tr.pc-row td.pc-cell-input { flex-wrap: wrap; }
+    .pc-table .num { text-align: left; }
+    .pc-input-product { min-width: 0; }
+    .pc-detail-row td { display: block; padding: 4px 12px 12px; }
+  }
+  /* 全消去の確認ダイアログ（§7.4 確認） */
+  .pc-modal { position: fixed; inset: 0; background: rgba(35, 32, 28, .45); display: flex;
+              align-items: center; justify-content: center; z-index: 50; }
+  .pc-modal[hidden] { display: none; }
+  .pc-modal-box { background: var(--surface); border-radius: 14px; padding: 22px 24px; max-width: 380px;
+                  margin: 16px; box-shadow: 0 12px 40px rgba(0,0,0,.18); }
+  .pc-modal-title { font-size: 15px; font-weight: 700; margin: 0 0 8px; }
+  .pc-modal-text { font-size: 13px; color: var(--text-2); margin: 0 0 16px; }
+  .pc-help-body { font-size: 13px; color: var(--text-2); }
+  .pc-help-body h3 { font-size: 13px; margin: 14px 0 6px; color: var(--text); }
+  .pc-help-body ul { margin: 4px 0 0; padding-left: 20px; }
+  .pc-help-body li + li { margin-top: 3px; }
+  .pc-formula { font-family: var(--mono); font-size: 12px; background: var(--chip-bg);
+                border: 1px solid var(--chip-line); border-radius: 8px; padding: 10px 12px;
+                margin: 6px 0 0; white-space: pre-wrap; overflow-x: auto; }
+</style>
+
+<div class="page-head">
+  <h1 class="page-title lg">税込・割引価格計算</h1>
+  <svg class="page-wave" width="62" height="8" viewBox="0 0 62 8" fill="none"><path d="M2 5C8 1.5 13 1.5 19 5s11 3.5 17 0 11-3.5 17 0 5 1 5 1" stroke="#3bb0d4" stroke-width="2" stroke-linecap="round"/></svg>
+  <p class="page-lead">楽天RMSに登録する複数個セットSKUの「割引後税抜価格」を計算します。<br>
+  計算前提：税別価格で登録／消費税額の1円未満は切り捨て／税率は商品ごとに8%または10%。</p>
+</div>
+
+<div class="btn-row mt-16">
+  <button type="button" id="pc-add" class="btn btn-primary btn-sm">＋ 行を追加</button>
+  <button type="button" id="pc-csv" class="btn btn-sm">CSV出力</button>
+  <button type="button" id="pc-clear" class="btn btn-sm">全消去</button>
+  <span id="pc-csv-note" class="pc-err" style="align-self:center;" hidden></span>
+</div>
+
+<div class="pc-scroll mt-14">
+  <table class="tbl pc-table">
+    <thead>
+      <tr>
+        <th>商品</th>
+        <th>税抜単価</th>
+        <th>数量<span class="pc-th-note">（入数）</span></th>
+        <th>税率</th>
+        <th>割引率%</th>
+        <th>税額</th>
+        <th>割引前税込</th>
+        <th>割引後税込</th>
+        <th>割引後税抜<span class="pc-th-note">RMS登録値</span></th>
+        <th>1個当たり</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody id="pc-body"></tbody>
+  </table>
+</div>
+
+<details class="fold mt-26">
+  <summary>
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#a79c8f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>
+    計算ルール・ヘルプ
+    <span class="fold-hint">開閉</span>
+  </summary>
+  <div class="fold-body pc-help-body">
+    <h3>数量の意味</h3>
+    <ul>
+      <li>「数量」は注文数量ではなく、<strong>セットSKUに含める入数</strong>です。単品を3個まとめた3個セットSKUを作る場合は「3」を入力します。</li>
+    </ul>
+    <h3>計算式（税額の1円未満はすべて切り捨て）</h3>
+    <div class="pc-formula">① 単品税額           = floor(商品単価 × 税率)
+② 単品税込価格       = 商品単価 + 単品税額
+③ 割引前税込価格     = 単品税込価格 × 数量
+④ 目標割引後税込価格 = floor(割引前税込価格 × (1 − 割引率))
+⑤ 割引後税抜価格     = RMS方式の税込再計算が目標額を超えない最大の整数円
+⑥ 税額（割引後）     = floor(割引後税抜価格 × 税率)
+⑦ 割引後税込価格     = 割引後税抜価格 + 税額（割引後）
+⑧ 1個当たり（税込）  = 割引後税込価格 ÷ 数量（参考値・小数第2位で四捨五入）
+⑨ 実効割引率         = 1 −（割引後税込価格 ÷ 割引前税込価格）</div>
+    <h3>端数処理と目標差額</h3>
+    <ul>
+      <li>「目標税込価格 ÷ 1.08／1.10」の単純な切り捨て・切り上げでは、RMS再計算で1円ずれる場合があります。本アプリは候補値をRMS方式で再計算し、<strong>目標額を超えない最大の税抜価格</strong>を採用します。</li>
+      <li>税額が段階的に増えるため、すべての税込価格を作れるとは限りません。目標額を再現できない場合は目標より低い側（通常1円差）を採用し、行の詳細に警告を表示します。</li>
+      <li>割引率0%でも、単品税額の切り捨てとセット全体の税額計算の差により、「商品単価 × 数量」とRMS登録用税抜価格が数円異なる場合があります。</li>
+    </ul>
+    <h3>対象外（このアプリでは計算しません）</h3>
+    <ul>
+      <li>注文全体クーポン・楽天ポイント・送料・決済手数料を含む最終請求額。</li>
+      <li>1つのセット内に税率8%商品と10%商品を混在させる計算（8%行と10%行を別行にすることは可能です）。</li>
+      <li>RMS APIへの自動登録、商品マスタとの自動同期。</li>
+      <li>税込価格で登録する商品の逆算、インボイス上の税率別税額集計。</li>
+    </ul>
+    <h3>入力・保存について</h3>
+    <ul>
+      <li><strong>Excelからのコピペに対応</strong>：Excelで範囲をコピーし、貼り付け開始位置の欄（例: 1行目の商品欄）で Ctrl+V すると、行・列が自動で展開されます。列順は「商品・税抜単価・数量・税率・割引率」です。単価だけの縦一列コピペも、その列に下方向へ流し込まれます（行が足りない分は自動追加）。</li>
+      <li>金額はカンマあり・なしのどちらでも入力できます。「¥3,565」「3565円」「5%」の表記も認識します。フォーカスを外すと整形されます。</li>
+      <li>入力内容はこのブラウザ内（localStorage）に自動保存され、次回起動時に復元されます。外部には送信されません。「全消去」で保存データも削除されます。</li>
+      <li>「コピー」はRMS登録用税抜価格（整数のみ・カンマなし）をコピーします。</li>
+    </ul>
+  </div>
+</details>
+
+<div id="pc-modal" class="pc-modal" hidden>
+  <div class="pc-modal-box" role="dialog" aria-modal="true" aria-labelledby="pc-modal-title">
+    <p class="pc-modal-title" id="pc-modal-title">全消去の確認</p>
+    <p class="pc-modal-text">入力中のデータをすべて削除します。よろしいですか？<br>ブラウザ内の一時保存データも削除されます。</p>
+    <div class="btn-row" style="margin-top:0;">
+      <button type="button" id="pc-modal-ok" class="btn btn-sm btn-primary">削除する</button>
+      <button type="button" id="pc-modal-cancel" class="btn btn-sm">キャンセル</button>
+    </div>
+  </div>
+</div>
+
+<script src="{{ url_for('static', path='/price_calc.js') }}"></script>
+<script src="{{ url_for('static', path='/price_calc_ui.js') }}"></script>
+{% endblock %}

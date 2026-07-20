@@ -1902,10 +1902,16 @@ def _yamato_b2_headless_default() -> bool:
     return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
-def resolve_default_b2_csv() -> Path | None:
-    """最新のB2取込CSVパスを返す（無ければ None）。UI表示・受け渡し用。"""
+def resolve_default_b2_csv(prefix: str = "ne-to-yamato") -> Path | None:
+    """最新のB2取込CSVパスを返す（無ければ None）。UI表示・受け渡し用。
+
+    prefix でフロー種別ごとのCSVを区別する（ヤマト=ne-to-yamato / ネコポス=ne-to-nekopos。
+    依頼5: 同一prefixだと直前に走った方のCSVが取り込まれる混線事故が起きるため分離）。
+    """
     try:
-        return _resolve_csv_file(None)
+        paths = find_portal_paths()
+        completed_dir = paths.portal_root / "ネクストエンジン" / COMPLETE_DIR_NAME
+        return latest_csv(completed_dir, prefix=prefix).resolve()
     except Exception:
         return None
 

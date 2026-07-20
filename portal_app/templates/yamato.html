@@ -1,10 +1,17 @@
 {% extends "base.html" %}
-{% block title %}ヤマト伝票 - くりまポータルツール{% endblock %}
+{% set mode = mode|default("yamato") %}
+{% set mode_label = mode_label|default("ヤマト伝票") %}
+{% block title %}{{ mode_label }} - くりまポータルツール{% endblock %}
 {% block content %}
 <div class="page-head">
-  <h1 class="page-title">ヤマト伝票</h1>
+  <h1 class="page-title">{{ mode_label }}</h1>
   <svg class="page-wave" width="62" height="8" viewBox="0 0 62 8" fill="none"><path d="M2 5C8 1.5 13 1.5 19 5s11 3.5 17 0 11-3.5 17 0 5 1 5 1" stroke="#3bb0d4" stroke-width="2" stroke-linecap="round"/></svg>
-  <p class="page-lead">印刷待ちの受注からヤマトB2の取込データを作成します。</p>
+  {% if mode == "nekopos" %}
+    <p class="page-lead">オリジナルステータス「ネコポス」の受注（保存検索・印刷待ち）から、ヤマトB2の取込データを作成します。<br>
+    送り状種別はネコポス(7)で出力し、温度区分・配達指定日・時間指定・代引額は自動で空欄化します。</p>
+  {% else %}
+    <p class="page-lead">印刷待ちの受注からヤマトB2の取込データを作成します。</p>
+  {% endif %}
 </div>
 
 {% if error %}
@@ -27,6 +34,7 @@
   </div>
 
   <form method="post" action="/yamato/run-full" data-progress-form data-progress-endpoint="/yamato/run-full/start" data-settings-from="yamato-csv-form">
+    <input type="hidden" name="mode" value="{{ mode }}">
     <input type="hidden" name="slow_mo_ms" value="150">
     <input type="hidden" name="preview_limit" value="30">
     <div class="cta-wrap">
@@ -52,6 +60,7 @@
   </div>
 
   <form id="yamato-csv-form" method="post" action="/yamato/run-selected" data-progress-form data-progress-endpoint="/yamato/run-selected/start">
+    <input type="hidden" name="mode" value="{{ mode }}">
     <input type="hidden" name="import_mode" value="execute">
     <input type="hidden" name="slow_mo_ms" value="150">
     <input type="hidden" name="preview_limit" value="30">
@@ -137,6 +146,7 @@
       {% if b2_csv_path %}<p class="mono">取込CSV: {{ b2_csv_path }}</p>{% endif %}
     </div>
     <form method="post" action="/yamato/b2-close" class="mt-14">
+      <input type="hidden" name="mode" value="{{ mode }}">
       <button class="btn" type="submit">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg>
         印刷が終わったのでB2ブラウザを閉じる
@@ -149,6 +159,7 @@
       <span class="flow-chip"><span class="flow-num">3</span>印刷する</span>
     </div>
     <form method="post" action="/yamato/b2-open" data-progress-form data-progress-endpoint="/yamato/b2-open/start">
+      <input type="hidden" name="mode" value="{{ mode }}">
       <div class="cta-wrap">
         <button class="btn-cta" type="submit"{% if not b2_csv_path %} disabled{% endif %}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M3 9h18"/></svg>
@@ -184,6 +195,7 @@
   <div class="fold-body">
     <p class="maint-note">検証などで進めた伝票を、納品書印刷待ちのステータスへ戻します。対象の伝票番号を改行で入力してください。状態を変更する操作のため、通常の本番作成では使いません。</p>
     <form method="post" action="/yamato/restore-print-wait">
+      <input type="hidden" name="mode" value="{{ mode }}">
       <input type="hidden" name="slow_mo_ms" value="150">
       <div class="field-row">
         <label class="field grow">
@@ -227,7 +239,7 @@
 </div>
 
 {% if defer_preview %}
-  <div class="lazy-slot" data-lazy="/yamato/preview">
+  <div class="lazy-slot" data-lazy="/yamato/preview?mode={{ mode }}">
     <span class="lazy-spinner" aria-hidden="true"></span>最新の変換データを読み込み中…
   </div>
 {% else %}
@@ -238,12 +250,12 @@
 // 進捗表示は共通スクリプト（/static/progress.js。base.html が読み込む）が担当する。
 // ここではページ固有の設定だけを渡す（U7: 進捗JSの共通化）。
 window.KURIMA_PROGRESS = {
-  // このページで開始しうる workflow（リロード時の再アタッチ対象。U4）
-  workflows: ["yamato_run_selected", "yamato_run_full", "yamato_b2_open"],
-  startTitle: "ヤマト用CSV作成",
+  // このページで開始しうる workflow（リロード時の再アタッチ対象。U4。mode ごとに分離）
+  workflows: ["{{ mode }}_run_selected", "{{ mode }}_run_full", "{{ mode }}_b2_open"],
+  startTitle: "{{ 'ヤマト用CSV作成' if mode == 'yamato' else mode_label ~ '用CSV作成' }}",
   // prepare=受注取得〜CSV作成(チップ①〜⑤), b2_open/open/b2_import=B2取込(チップ⑥)
   stepChips: { ne_fetch: [1], invoice: [2], custom: [3], conversion: [4, 5], b2_open: [6], open: [6], b2_import: [6] },
-  completeRedirect: "/yamato",
+  completeRedirect: "{{ '/nekopos' if mode == 'nekopos' else '/yamato' }}",
   completeMessage: "完了しました。最新の結果を読み込みます…",
   // data-settings-from を持つフォーム（一括実行）が参照先フォームと共有する詳細設定
   settingsShareKeys: ["test_restore_print_wait", "verify_invoice_statuses", "headed"],

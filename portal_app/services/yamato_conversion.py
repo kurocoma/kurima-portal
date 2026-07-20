@@ -17,6 +17,7 @@ from openpyxl.utils import range_boundaries
 from portal_app.services.master_cache import cached_by_mtime
 
 from portal_app.services.paths import PortalPaths, find_portal_paths
+from portal_app.services.yamato_flow_profile import YAMATO_PROFILE, YamatoFlowProfile
 
 
 APP_ROOT = Path(__file__).resolve().parents[2]
@@ -128,6 +129,28 @@ PREVIEW_COLUMNS = [
     "品名1",
 ]
 
+# 2026-07-20 依頼3: 出荷予定日の翌日以前（翌日・当日・過去日）の配達指定日はB2取込で
+# エラーになるため、変換時に指定を削除する。判定基準は行の「出荷予定日」列
+# （B2は取込CSVの出荷予定日を出荷日として扱うため、B2側のエラー判定と同じ基準になる）。
+SHIP_DATE_COLUMN = "出荷予定日"
+DELIVERY_DATE_COLUMN = "配達指定日"
+MIN_DELIVERY_LEAD_DAYS = 2  # 配達指定日 − 出荷予定日 がこの日数未満なら指定を削除
+
+# 2026-07-20 依頼5: ネコポスでは指定できない列（変換時に空欄化する対象）。
+# 温度区分（クール）と代引額が入っている行はネコポス対象外の受注が混ざっている
+# 可能性があるため、空欄化と同時に受注番号付きの警告を出す。
+INVOICE_TYPE_COLUMN = "送り状種別"
+NEKOPOS_UNSUPPORTED_COLUMNS = (
+    "温度区分",
+    "配達指定日",
+    "時間指定コード",
+    "コレクト代金引換額（税込）",
+    "コレクト内消費税額",
+    "営業所止置き",
+    "止め置き営業所コード",
+)
+NEKOPOS_SUSPICIOUS_COLUMNS = ("温度区分", "コレクト代金引換額（税込）")
+
 SOURCE_DIR_NAME = "ne-yamatocsv"
 COMPLETE_DIR_NAME = "完成データ"
 ITEM_NAME_TABLE = "品名テーブル_DB"
@@ -224,11 +247,13 @@ def preview_ne_to_yamato_conversion(
     *,
     source_csv: Path | None = None,
     preview_limit: int = 50,
+    profile: YamatoFlowProfile = YAMATO_PROFILE,
 ) -> YamatoConversionResult:
     return convert_ne_to_yamato_csv(
         source_csv=source_csv,
         write=False,
         preview_limit=preview_limit,
+        profile=profile,
     )
 
 
@@ -236,11 +261,13 @@ def create_ne_to_yamato_csv(
     *,
     source_csv: Path | None = None,
     preview_limit: int = 50,
+    profile: YamatoFlowProfile = YAMATO_PROFILE,
 ) -> YamatoConversionResult:
     return convert_ne_to_yamato_csv(
         source_csv=source_csv,
         write=True,
         preview_limit=preview_limit,
+        profile=profile,
     )
 
 
@@ -249,12 +276,15 @@ def convert_ne_to_yamato_csv(
     source_csv: Path | None = None,
     write: bool,
     preview_limit: int = 50,
+    profile: YamatoFlowProfile = YAMATO_PROFILE,
 ) -> YamatoConversionResult:
     paths = find_portal_paths()
     ne_root = paths.portal_root / "ネクストエンジン"
-    source_dir = ne_root / SOURCE_DIR_NAME
+    source_dir = ne_root / profile.source_dir_name
     complete_dir = ne_root / COMPLETE_DIR_NAME
-    selected_source = Path(source_csv) if source_csv else latest_csv(source_dir, prefix="ne-yamato")
+    selected_source = (
+        Path(source_csv) if source_csv else latest_csv(source_dir, prefix=profile.source_prefix)
+    )
 
     item_map, item_master_rows, item_warnings = load_item_name_map(paths)
     source_df = read_yamato_source_csv(selected_source)
@@ -263,12 +293,12 @@ def convert_ne_to_yamato_csv(
         transform_warnings,
         address_reviews,
         address_adjusted_rows,
-    ) = transform_ne_to_yamato(source_df, item_map)
+    ) = transform_ne_to_yamato(source_df, item_map, profile=profile)
 
     output_path = None
     if write:
         complete_dir.mkdir(parents=True, exist_ok=True)
-        output_path = next_output_path(complete_dir, prefix="ne-to-yamato", suffix=".csv")
+        output_path = next_output_path(complete_dir, prefix=profile.output_prefix, suffix=".csv")
         write_quoted_cp932_csv(converted_df, output_path)
     audit_path = YAMATO_CONVERSION_AUDIT_LOG_PATH if write else None
 
@@ -301,6 +331,8 @@ def convert_ne_to_yamato_csv(
 def transform_ne_to_yamato(
     source_df: pd.DataFrame,
     item_name_map: dict[str, str],
+    *,
+    profile: YamatoFlowProfile = YAMATO_PROFILE,
 ) -> tuple[pd.DataFrame, list[str], tuple[YamatoAddressReview, ...], int]:
     validate_headers(source_df.columns, expected=YAMATO_INPUT_HEADERS)
     warnings_out: list[str] = []
@@ -339,6 +371,17 @@ def transform_ne_to_yamato(
             f"{address_review_rows} 行の届け先住所/建物名は手動確認が必要です。"
         )
 
+    cleared_count, cleared_orders = clear_undeliverable_delivery_dates(df)
+    if cleared_count:
+        warnings_out.append(
+            f"{cleared_count} 行の配達指定日を削除しました"
+            "（出荷予定日の翌日以前の指定はB2取込でエラーになるため）: 受注番号 "
+            + ", ".join(cleared_orders[:20])
+            + (" ..." if len(cleared_orders) > 20 else "")
+        )
+
+    apply_profile_invoice_rules(df, profile, warnings_out)
+
     missing_item_codes = find_unmapped_item_codes(source_df, item_name_map)
     if missing_item_codes:
         warnings_out.append(
@@ -350,6 +393,104 @@ def transform_ne_to_yamato(
     df = df.sort_values("_source_index", kind="stable")
     df = df[YAMATO_OUTPUT_HEADERS].fillna("").astype(str)
     return df, warnings_out, tuple(address_reviews), address_adjusted_rows
+
+
+def parse_b2_date(value: object) -> datetime | None:
+    """B2取込CSVの日付セル（YYYY/MM/DD）を解釈する。空欄・解釈不能は None。"""
+    text = normalize_cell(value)
+    if not text:
+        return None
+    for fmt in ("%Y/%m/%d", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def clear_undeliverable_delivery_dates(dataframe: pd.DataFrame) -> tuple[int, list[str]]:
+    """配達指定日が出荷予定日の翌日以前の行は指定を空欄にする（依頼3）。
+
+    - 配達指定日が空欄・解釈不能な行は触らない（不正値の判定はB2に委ねる）。
+    - 出荷予定日が解釈できない行は判定できないため触らない。
+    戻り値は (削除行数, 対象のお客様管理番号リスト)。
+    """
+    cleared_orders: list[str] = []
+    if DELIVERY_DATE_COLUMN not in dataframe.columns:
+        return 0, cleared_orders
+    for index, value in dataframe[DELIVERY_DATE_COLUMN].items():
+        delivery_date = parse_b2_date(value)
+        if delivery_date is None:
+            continue
+        ship_date = parse_b2_date(dataframe.at[index, SHIP_DATE_COLUMN])
+        if ship_date is None:
+            continue
+        if (delivery_date - ship_date).days < MIN_DELIVERY_LEAD_DAYS:
+            dataframe.at[index, DELIVERY_DATE_COLUMN] = ""
+            cleared_orders.append(normalize_cell(dataframe.at[index, "お客様管理番号"]))
+    return len(cleared_orders), cleared_orders
+
+
+def apply_profile_invoice_rules(
+    dataframe: pd.DataFrame,
+    profile: YamatoFlowProfile,
+    warnings_out: list[str],
+) -> None:
+    """フロー種別ごとの送り状ルール（依頼5: ネコポス）を適用する。
+
+    - invoice_type_override: 送り状種別を指定値へ上書き（既に同値の行は変更なし）。
+      変更が発生した場合は、NEカスタムパターンの出力値と想定が違うことを意味する
+      ため、変更前の値と件数を警告で明示する。
+    - clear_unsupported_columns: ネコポスで指定できない列を空欄化する。
+      温度区分（クール）・コレクト額（代引）が入っていた行は、ネコポス対象外の
+      受注が混ざっている可能性があるため受注番号付きで警告する（出力は続行）。
+    """
+    if profile.invoice_type_override is not None and INVOICE_TYPE_COLUMN in dataframe.columns:
+        override = profile.invoice_type_override
+        original = dataframe[INVOICE_TYPE_COLUMN].map(normalize_cell)
+        changed_mask = original != override
+        changed = int(changed_mask.sum())
+        if changed:
+            before_values = sorted(set(original[changed_mask]) - {""}) or ["(空欄)"]
+            dataframe.loc[changed_mask, INVOICE_TYPE_COLUMN] = override
+            warnings_out.append(
+                f"{changed} 行の送り状種別を {override}（{profile.label}）へ変更しました"
+                f"（変更前の値: {', '.join(before_values[:5])}）。"
+            )
+
+    if profile.clear_unsupported_columns:
+        suspicious_orders: list[str] = []
+        cleared_columns: list[str] = []
+        for column in NEKOPOS_UNSUPPORTED_COLUMNS:
+            if column not in dataframe.columns:
+                continue
+            normalized = dataframe[column].map(normalize_cell)
+            non_empty = normalized != ""
+            # NEパターンは代引でない受注にもコレクト額「0」を出力する（2026-07-21 実CSVで確認）。
+            # ゼロ値は「指定なし」と同義のため、空欄化はするが警告・代引疑いの対象にはしない。
+            meaningful = non_empty & ~normalized.str.fullmatch(r"0+(?:\.0+)?").fillna(False)
+            count = int(meaningful.sum())
+            if column in NEKOPOS_SUSPICIOUS_COLUMNS and count:
+                suspicious_orders.extend(
+                    normalize_cell(value)
+                    for value in dataframe.loc[meaningful, "お客様管理番号"]
+                )
+            dataframe.loc[non_empty, column] = ""
+            if count:
+                cleared_columns.append(f"{column}({count}行)")
+        if cleared_columns:
+            warnings_out.append(
+                f"{profile.label}では指定できない項目を空欄化しました: "
+                + "、".join(cleared_columns)
+            )
+        if suspicious_orders:
+            unique_orders = list(dict.fromkeys(order for order in suspicious_orders if order))
+            warnings_out.append(
+                "クール便・代引の指定があった受注が含まれています。"
+                f"{profile.label}対象か確認してください: 受注番号 "
+                + ", ".join(unique_orders[:20])
+                + (" ..." if len(unique_orders) > 20 else "")
+            )
 
 
 def apply_b2_phone_rules(dataframe: pd.DataFrame) -> int:

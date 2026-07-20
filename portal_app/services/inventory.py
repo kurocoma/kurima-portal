@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
@@ -55,6 +55,8 @@ class InventoryResult:
     normal_rows: list[dict[str, object]]
     choice_rows: list[dict[str, object]]
     warnings: list[str]
+    # 2026-07-20 依頼2: 通常商品とセット内訳をJANコードで対応付けた数量合算表
+    combined_rows: list[dict[str, object]] = field(default_factory=list)
 
     @property
     def normal_count(self) -> int:
@@ -63,6 +65,10 @@ class InventoryResult:
     @property
     def choice_count(self) -> int:
         return len(self.choice_rows)
+
+    @property
+    def combined_count(self) -> int:
+        return len(self.combined_rows or [])
 
 
 @dataclass(frozen=True)
@@ -83,7 +89,9 @@ def analyze_inventory(paths: PortalPaths, source_csv: Path) -> InventoryResult:
     masters = read_master_tables(paths.master_book)
 
     normal = build_normal_products(orders, masters)
-    choice = build_choice_products(orders, masters, warnings)
+    choice_detail = _build_choice_products_detail(orders, masters, warnings)
+    choice = _choice_public_view(choice_detail)
+    combined = build_combined_products(normal, choice_detail, masters)
 
     return InventoryResult(
         generated_at=datetime.now(),
@@ -93,6 +101,7 @@ def analyze_inventory(paths: PortalPaths, source_csv: Path) -> InventoryResult:
         normal_rows=_records(normal),
         choice_rows=_records(choice),
         warnings=warnings,
+        combined_rows=_records(combined),
     )
 
 
@@ -191,6 +200,21 @@ def build_choice_products(
     masters: MasterTables,
     warnings: list[str],
 ) -> pd.DataFrame:
+    return _choice_public_view(_build_choice_products_detail(orders, masters, warnings))
+
+
+def _choice_public_view(choice_detail: pd.DataFrame) -> pd.DataFrame:
+    """従来の選べるセット表（内訳JANコード列なし）を返す。"""
+    return choice_detail.loc[:, ["商品名", "発注数量", "備考"]].reset_index(drop=True)
+
+
+def _build_choice_products_detail(
+    orders: pd.DataFrame,
+    masters: MasterTables,
+    warnings: list[str],
+) -> pd.DataFrame:
+    """選べるセット集計の内部版。合算表（依頼2）で使う内訳JANコード列を保持して返す。"""
+    empty = pd.DataFrame(columns=["内訳JANコード", "商品名", "発注数量", "備考"])
     work = _not_ordered_rows(orders)[
         ["商品ｺｰﾄﾞ", "商品ｵﾌﾟｼｮﾝ", "受注数", "引当数", "作業者欄"]
     ].copy()
@@ -198,12 +222,12 @@ def build_choice_products(
     choice_keys = masters.choice_master[["NEコード"]].drop_duplicates(subset=["NEコード"])
     work = work.merge(choice_keys, left_on="商品ｺｰﾄﾞ", right_on="NEコード", how="inner")
     if work.empty:
-        return pd.DataFrame(columns=["商品名", "発注数量", "備考"])
+        return empty
 
     work = work.drop(columns=["NEコード", "作業者欄"])
     expanded = _expand_options(work, warnings)
     if expanded.empty:
-        return pd.DataFrame(columns=["商品名", "発注数量", "備考"])
+        return empty
 
     expanded["商品ｺｰﾄﾞ"] = expanded["商品ｺｰﾄﾞ"].replace(
         {"bireleysaraberuset": "a009-2215-c01"}
@@ -247,11 +271,100 @@ def build_choice_products(
         .sum()
         .rename(columns={"内訳商品名": "商品名", "受注数×内訳数量": "発注数量"})
     )
-    grouped = grouped.drop(columns=["内訳JANコード"])
+    grouped["内訳JANコード"] = grouped["内訳JANコード"].fillna("")
     grouped["発注数量"] = grouped["発注数量"].astype(int)
     grouped["備考"] = "選べるセット"
-    return grouped.loc[:, ["商品名", "発注数量", "備考"]].sort_values("商品名").reset_index(
-        drop=True
+    return (
+        grouped.loc[:, ["内訳JANコード", "商品名", "発注数量", "備考"]]
+        .sort_values("商品名")
+        .reset_index(drop=True)
+    )
+
+
+def build_combined_products(
+    normal: pd.DataFrame,
+    choice_detail: pd.DataFrame,
+    masters: MasterTables,
+) -> pd.DataFrame:
+    """通常商品とセット内訳をJANコードで対応付けた数量合算表（依頼2）。
+
+    確定仕様（2026-07-20 ユーザー回答）:
+    - 列は 商品コード / 商品名 / 必要数 / 備考 の4列。
+    - 必要数 = 通常商品の受注数 + 選べるセットの発注数量（受注数×内訳数量）。
+    - 引当数はセット側に対応する値が無いため合算表には載せない。
+    - 備考は由来を表示: 「通常のみ」「セット含む」「セットのみ」。
+    - 対応付けはJANコード（通常商品のNEコードは商品マスタでJANに解決する）。
+      JANに解決できない行は合算されず、そのまま独立行として残す。
+    """
+    normal_work = normal.copy() if not normal.empty else pd.DataFrame(
+        columns=["商品ｺｰﾄﾞ", "商品名", "受注数", "引当数"]
+    )
+    choice_work = choice_detail.copy() if not choice_detail.empty else pd.DataFrame(
+        columns=["内訳JANコード", "商品名", "発注数量", "備考"]
+    )
+
+    ne_to_jan = (
+        masters.product_master[["NEコード", "JANコード"]]
+        .drop_duplicates(subset=["NEコード"])
+        .copy()
+        if {"NEコード", "JANコード"}.issubset(masters.product_master.columns)
+        else pd.DataFrame(columns=["NEコード", "JANコード"])
+    )
+
+    normal_work = normal_work.merge(
+        ne_to_jan, left_on="商品ｺｰﾄﾞ", right_on="NEコード", how="left"
+    )
+    normal_work["JANコード"] = normal_work["JANコード"].fillna("").astype(str)
+    # 結合キー: JANがあればJAN。無ければ衝突しない接頭辞付きコードで独立行にする
+    normal_jan = normal_work["JANコード"]
+    normal_work["_key"] = normal_jan.where(
+        normal_jan != "", "NE::" + normal_work["商品ｺｰﾄﾞ"].astype(str)
+    )
+    # 同一JANに複数のNEコードが解決される場合の二重計上を防ぐため、キー単位で先に合算する
+    # 注: キーワード引数名はNFKC正規化で半角カナが化けるため dict 形式で列名を指定する
+    normal_grouped = normal_work.groupby("_key", as_index=False).agg(
+        {
+            "商品ｺｰﾄﾞ": lambda s: "／".join(dict.fromkeys(s.astype(str))),
+            "商品名": "first",
+            "受注数": "sum",
+        }
+    )
+
+    choice_work["内訳JANコード"] = choice_work["内訳JANコード"].fillna("").astype(str)
+    choice_jan = choice_work["内訳JANコード"]
+    choice_work["_key"] = choice_jan.where(
+        choice_jan != "", "CH::" + choice_work["商品名"].astype(str)
+    )
+
+    merged = normal_grouped.loc[:, ["_key", "商品ｺｰﾄﾞ", "商品名", "受注数"]].merge(
+        choice_work.loc[:, ["_key", "内訳JANコード", "商品名", "発注数量"]],
+        on="_key",
+        how="outer",
+        suffixes=("_通常", "_セット"),
+    )
+
+    merged["受注数"] = pd.to_numeric(merged["受注数"], errors="coerce").fillna(0).astype(int)
+    merged["発注数量"] = (
+        pd.to_numeric(merged["発注数量"], errors="coerce").fillna(0).astype(int)
+    )
+    has_normal = merged["商品ｺｰﾄﾞ"].notna()
+    has_choice = merged["商品名_セット"].notna()
+
+    merged["必要数"] = merged["受注数"] + merged["発注数量"]
+    merged["商品コード"] = (
+        merged["商品ｺｰﾄﾞ"].fillna("").astype(str).where(has_normal, merged["内訳JANコード"].fillna(""))
+    )
+    normal_names = merged["商品名_通常"].fillna("").astype(str)
+    choice_names = merged["商品名_セット"].fillna("").astype(str)
+    merged["商品名"] = normal_names.where(normal_names != "", choice_names)
+    merged["備考"] = "通常のみ"
+    merged.loc[has_normal & has_choice, "備考"] = "セット含む"
+    merged.loc[~has_normal & has_choice, "備考"] = "セットのみ"
+
+    return (
+        merged.loc[:, ["商品コード", "商品名", "必要数", "備考"]]
+        .sort_values(["商品コード", "商品名"])
+        .reset_index(drop=True)
     )
 
 

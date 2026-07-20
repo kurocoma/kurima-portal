@@ -16,11 +16,13 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 from portal_app.services.inventory import InventoryResult
 
 JP_FONT = "HeiseiKakuGo-W5"
-InventoryPdfKind = Literal["all", "normal", "choice"]
+InventoryPdfKind = Literal["all", "normal", "choice", "combined"]
 PDF_KIND_TITLES: dict[InventoryPdfKind, str] = {
     "all": "在庫明細確認",
     "normal": "在庫明細確認 - 通常商品",
     "choice": "在庫明細確認 - 選べるセット",
+    # 2026-07-20 依頼2: 通常商品とセット内訳をJANコードで対応付けた数量合算表
+    "combined": "在庫明細確認 - 合算（通常＋選べるセット）",
 }
 
 
@@ -64,6 +66,17 @@ def inventory_result_to_pdf(result: InventoryResult, kind: InventoryPdfKind = "a
                 rows=result.choice_rows,
                 col_widths=(doc.width - 220, 80, 140),
                 numeric_indexes={1},
+                styles=styles,
+            )
+        )
+
+    if kind == "combined":
+        story.append(
+            _data_table(
+                headers=("商品コード", "商品名", "必要数", "備考"),
+                rows=result.combined_rows,
+                col_widths=(110, doc.width - 110 - 80 - 120, 80, 120),
+                numeric_indexes={2},
                 styles=styles,
             )
         )

@@ -19,6 +19,7 @@ from portal_app.services.next_engine_downloader import (
     _next_engine_storage_lock,
 )
 from portal_app.services.paths import PortalPaths, find_portal_paths
+from portal_app.services.yamato_flow_profile import YAMATO_PROFILE, YamatoFlowProfile
 from portal_app.settings import download_timeout_ms, nav_timeout_ms
 
 
@@ -202,7 +203,16 @@ def download_yamato_custom_shipping_data_sync(
 
 
 class NextEngineYamatoClient:
-    def __init__(self, *, headless: bool | None, slow_mo_ms: int) -> None:
+    def __init__(
+        self,
+        *,
+        headless: bool | None,
+        slow_mo_ms: int,
+        profile: YamatoFlowProfile = YAMATO_PROFILE,
+    ) -> None:
+        # profile で 保存検索URL・発送方法フィルタ・保存先prefix を切り替える
+        # （既定はヤマト伝票=従来挙動。ネコポスカードは NEKOPOS_PROFILE を渡す）。
+        self.profile = profile
         self.headless = _headless_default() if headless is None else headless
         self.slow_mo_ms = slow_mo_ms
         self.paths = find_portal_paths()
@@ -309,7 +319,7 @@ class NextEngineYamatoClient:
             destination = _next_yamato_file_path(
                 self.paths,
                 ("ネクストエンジン受注データ", "購入者データ"),
-                "dataヤマト",
+                self.profile.data_prefix,
                 ".csv",
             )
             source_filename = await _download_ne_csv_from_current_page(
@@ -369,7 +379,7 @@ class NextEngineYamatoClient:
             destination = _next_yamato_file_path(
                 self.paths,
                 ("ネクストエンジン受注データ", "商品情報データ"),
-                "dataヤマト",
+                self.profile.data_prefix,
                 ".csv",
             )
             source_filename = await _download_ne_csv_from_current_page(
@@ -396,15 +406,17 @@ class NextEngineYamatoClient:
         execute: bool,
         order_numbers_filter: tuple[str, ...] = tuple(),
     ) -> YamatoCustomShippingDownloadResult:
+        pattern_name = self.profile.custom_delivery_pattern
         async with self._open_custom_data_download_page() as page:
             warning_text = await _open_custom_shipping_download_modal(
                 page,
                 order_numbers_filter=order_numbers_filter,
+                pattern_name=pattern_name,
             )
             if not execute:
                 return YamatoCustomShippingDownloadResult(
                     executed=False,
-                    pattern_name=CUSTOM_DELIVERY_PATTERN,
+                    pattern_name=pattern_name,
                     ready_to_download=True,
                     downloaded_file=None,
                     source_filename=None,
@@ -416,8 +428,8 @@ class NextEngineYamatoClient:
 
             destination = _next_yamato_file_path(
                 self.paths,
-                ("ne-yamatocsv",),
-                "ne-yamato",
+                (self.profile.source_dir_name,),
+                self.profile.source_prefix,
                 ".csv",
             )
             try:
@@ -429,7 +441,7 @@ class NextEngineYamatoClient:
                 if status_message:
                     result = YamatoCustomShippingDownloadResult(
                         executed=True,
-                        pattern_name=CUSTOM_DELIVERY_PATTERN,
+                        pattern_name=pattern_name,
                         ready_to_download=True,
                         downloaded_file=None,
                         source_filename=None,
@@ -445,7 +457,7 @@ class NextEngineYamatoClient:
 
             result = YamatoCustomShippingDownloadResult(
                 executed=True,
-                pattern_name=CUSTOM_DELIVERY_PATTERN,
+                pattern_name=pattern_name,
                 ready_to_download=True,
                 downloaded_file=destination,
                 source_filename=download.suggested_filename,
@@ -506,8 +518,12 @@ class _FilteredOrderListSession:
             self.page = await self.context.new_page()
             await self._goto_order_list()
             await self.page.wait_for_timeout(1500)
+            await _apply_original_status_search(
+                self.page, self.client.profile.original_status_id
+            )
             await _filter_yamato_shipping_methods(
                 self.page,
+                shipping_options=self.client.profile.shipping_options,
                 order_numbers_filter=self.order_numbers_filter,
             )
             return self.page
@@ -528,8 +544,12 @@ class _FilteredOrderListSession:
         await self.client.login_client._login(self.page)
         await self._goto_order_list()
         await self.page.wait_for_timeout(1500)
+        await _apply_original_status_search(
+            self.page, self.client.profile.original_status_id
+        )
         await _filter_yamato_shipping_methods(
             self.page,
+            shipping_options=self.client.profile.shipping_options,
             order_numbers_filter=self.order_numbers_filter,
         )
         await self.context.storage_state(path=str(STORAGE_STATE_PATH))
@@ -537,13 +557,14 @@ class _FilteredOrderListSession:
 
     async def _goto_order_list(self) -> None:
         assert self.page is not None
-        await self.page.goto(ORDER_LIST_PRINT_WAIT_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
+        order_list_url = self.client.profile.order_list_url
+        await self.page.goto(order_list_url, wait_until="domcontentloaded", timeout=nav_timeout_ms())
         try:
             await self.page.wait_for_selector("#jyuchu_dlg_open", timeout=30000)
             return
         except PlaywrightTimeoutError:
             await self.client.login_client._login(self.page)
-            await self.page.goto(ORDER_LIST_PRINT_WAIT_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
+            await self.page.goto(order_list_url, wait_until="domcontentloaded", timeout=nav_timeout_ms())
             try:
                 await self.page.wait_for_selector("#jyuchu_dlg_open", timeout=30000)
             except PlaywrightTimeoutError:
@@ -660,39 +681,74 @@ class _CustomDataDownloadSession:
                 self.storage_lock = None
 
 
+async def _apply_original_status_search(page, original_status_id: int | None) -> None:
+    """受注一覧のオリジナルステータス検索（「ネコポス」等のバッジボタン相当）を適用する。
+
+    バッジは <a id="original_status_<ID>" href="javascript:originalStatus.search(<ID>)">
+    で実装されている（依頼5の実機調査で確認）。ID が None のときは何もしない。
+    """
+    if original_status_id is None:
+        return
+    badge = page.locator(f"#original_status_{original_status_id}")
+    try:
+        await badge.wait_for(state="visible", timeout=30000)
+    except PlaywrightTimeoutError as exc:
+        raise RuntimeError(
+            f"オリジナルステータスのボタンが見つかりません: #original_status_{original_status_id}"
+            "（NE側でステータスが削除・変更された可能性があります）"
+        ) from exc
+    await badge.click()
+    await page.wait_for_timeout(3500)
+    await page.wait_for_function(
+        "() => !document.body.innerText.includes('件数取得中')",
+        timeout=60000,
+    )
+
+
 async def _filter_yamato_shipping_methods(
     page,
     *,
+    shipping_options: tuple[str, ...] | list[str] = tuple(YAMATO_SHIPPING_OPTIONS),
     order_numbers_filter: tuple[str, ...] = tuple(),
 ) -> None:
+    normalized_orders = tuple(
+        str(value).strip() for value in order_numbers_filter if str(value).strip()
+    )
+    # ネコポス等: 発送方法の再選択が不要で伝票番号の絞り込みも無いときは、
+    # 検索ダイアログを開かず保存検索の条件を正とする（再検索すると保存検索の
+    # オリジナルステータス等の条件が外れる恐れがあるため）。
+    if not shipping_options and not normalized_orders:
+        return
+
     await page.locator("#jyuchu_dlg_open").click()
     await page.wait_for_selector("#sea_jyuchu_search_field05", timeout=30000)
-    updated = await page.evaluate(
-        """
-        (wantedTexts) => {
-          const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim();
-          const wanted = wantedTexts.map(normalize);
-          const select = document.querySelector("#sea_jyuchu_search_field05");
-          if (!select) return { ok: false, reason: "select_not_found" };
-          const options = Array.from(select.options);
-          if (!wanted.every((text) => options.some((option) => normalize(option.textContent) === text))) {
-            return { ok: false, reason: "option_not_found" };
-          }
-          for (const option of options) {
-            option.selected = wanted.includes(normalize(option.textContent));
-          }
-          select.dispatchEvent(new Event("change", { bubbles: true }));
-          return { ok: true };
-        }
-        """,
-        YAMATO_SHIPPING_OPTIONS,
-    )
-    if not updated.get("ok"):
-        raise RuntimeError(f"ヤマト発送方法を選択できませんでした: {updated}")
+    if shipping_options:
+        updated = await page.evaluate(
+            """
+            (wantedTexts) => {
+              const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim();
+              const wanted = wantedTexts.map(normalize);
+              const select = document.querySelector("#sea_jyuchu_search_field05");
+              if (!select) return { ok: false, reason: "select_not_found" };
+              const options = Array.from(select.options);
+              if (!wanted.every((text) => options.some((option) => normalize(option.textContent) === text))) {
+                return { ok: false, reason: "option_not_found" };
+              }
+              for (const option of options) {
+                option.selected = wanted.includes(normalize(option.textContent));
+              }
+              select.dispatchEvent(new Event("change", { bubbles: true }));
+              return { ok: true };
+            }
+            """,
+            list(shipping_options),
+        )
+        if not updated.get("ok"):
+            raise RuntimeError(f"ヤマト発送方法を選択できませんでした: {updated}")
 
     await _apply_order_list_order_filter(
         page,
-        order_numbers_filter=order_numbers_filter,
+        order_numbers_filter=normalized_orders,
     )
     await _click_search(page)
     await page.wait_for_timeout(3500)
@@ -953,7 +1009,9 @@ async def _reload_next_engine_download_page(page) -> None:
         await page.wait_for_timeout(2500)
 
 
-async def _ensure_custom_delivery_pattern_visible(page) -> None:
+async def _ensure_custom_delivery_pattern_visible(
+    page, pattern_name: str = CUSTOM_DELIVERY_PATTERN
+) -> None:
     """「配送情報」フォルダを確実に展開し、子パターンが本文に現れる状態にする。
 
     タイトルのクリックはトグルのため、可視判定→未表示ならクリック→再判定を繰り返す
@@ -965,7 +1023,7 @@ async def _ensure_custom_delivery_pattern_visible(page) -> None:
         try:
             return bool(
                 await page.evaluate(
-                    "(p) => document.body.innerText.includes(p)", CUSTOM_DELIVERY_PATTERN
+                    "(p) => document.body.innerText.includes(p)", pattern_name
                 )
             )
         except Exception:
@@ -996,7 +1054,7 @@ async def _ensure_custom_delivery_pattern_visible(page) -> None:
         await _save_yamato_debug_artifacts(page, "custom_delivery_pattern_not_expanded")
         raise RuntimeError(
             "カスタムデータ作成で「配送情報」フォルダを展開できませんでした"
-            f"（パターン『{CUSTOM_DELIVERY_PATTERN}』が表示されません）。"
+            f"（パターン『{pattern_name}』が表示されません）。"
         )
 
 
@@ -1004,6 +1062,7 @@ async def _open_custom_shipping_download_modal(
     page,
     *,
     order_numbers_filter: tuple[str, ...] = tuple(),
+    pattern_name: str = CUSTOM_DELIVERY_PATTERN,
 ) -> str:
     delivery_folder = page.locator("#tree a.dynatree-title").filter(has_text=CUSTOM_DELIVERY_FOLDER)
     if await delivery_folder.count() == 0:
@@ -1011,11 +1070,11 @@ async def _open_custom_shipping_download_modal(
     # 「配送情報」フォルダのクリックはトグル（展開/折りたたみ）で、初期展開状態次第では
     # 子パターンが表示されず wait_for_function が30秒タイムアウトしていた（実機解析で確認）。
     # パターンが本文に現れるまでクリック展開を試み、駄目ならツリーを再読込して再試行する。
-    await _ensure_custom_delivery_pattern_visible(page)
+    await _ensure_custom_delivery_pattern_visible(page, pattern_name)
 
-    pattern = page.locator("#tree a.dynatree-title").filter(has_text=CUSTOM_DELIVERY_PATTERN)
+    pattern = page.locator("#tree a.dynatree-title").filter(has_text=pattern_name)
     if await pattern.count() == 0:
-        raise RuntimeError(f"カスタムデータ作成で対象パターンが見つかりません: {CUSTOM_DELIVERY_PATTERN}")
+        raise RuntimeError(f"カスタムデータ作成で対象パターンが見つかりません: {pattern_name}")
     await pattern.first.click()
     await page.wait_for_timeout(1500)
     await _apply_custom_shipping_order_filter(
