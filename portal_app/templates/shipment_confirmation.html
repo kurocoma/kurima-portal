@@ -109,6 +109,12 @@
       <input type="hidden" name="target_date" value="">
       <input type="hidden" name="execute" value="1">
       <button class="btn" type="submit">ヤマト発行済データ取得</button>
+      <label class="opt plain" style="display:inline-flex;margin-left:10px;">
+        <input type="checkbox" name="headed" value="on">
+        <span>
+          <strong class="opt-title">ブラウザ画面を表示して実行</strong>
+        </span>
+      </label>
     </form>
     <button class="btn btn-primary" type="button" id="reload-mapping">マッピング再読込</button>
   </div>
@@ -176,6 +182,13 @@
       <span>
         <strong class="opt-title">確認しました: このCSVをネクストエンジンへ反映します</strong>
         <span class="opt-desc">アップロード前チェックで候補CSVと警告を確認してからチェックしてください。チェックなしでは反映されません。</span>
+      </span>
+    </label>
+    <label class="opt plain">
+      <input type="checkbox" name="headed" value="on">
+      <span>
+        <strong class="opt-title">ブラウザ画面を表示して実行</strong>
+        <span class="opt-desc">NEの画面を見ながら反映したいとき・反映結果を目視確認したいときにチェックします。未チェック時はバックグラウンド（非表示）で実行します。</span>
       </span>
     </label>
     <div class="cta-wrap">
@@ -580,7 +593,15 @@
     try {
       const body = new URLSearchParams();
       body.set("preview_limit", "30");
-      const response = await fetch("/shipment-confirmation/upload-check", { method: "POST", body });
+      // タイムアウト付き（以前は無制限で「チェック中…」のまま固まって見えた）
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 120000);
+      let response;
+      try {
+        response = await fetch("/shipment-confirmation/upload-check", { method: "POST", body, signal: controller.signal });
+      } finally {
+        clearTimeout(timeoutId);
+      }
       if (!response.ok) throw new Error("HTTP " + response.status);
       lastCheck = await response.json();
       el("upload-check-result").hidden = false;

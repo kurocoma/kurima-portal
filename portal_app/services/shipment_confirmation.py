@@ -387,6 +387,7 @@ async def upload_next_engine_shipment_csv(
     headless: bool | None = None,
     slow_mo_ms: int = 0,
     preview_limit: int = 20,
+    on_upload_start=None,
 ) -> ShipmentUploadResult:
     preview = _build_shipment_upload_result(
         upload_csv=upload_csv,
@@ -426,12 +427,19 @@ async def upload_next_engine_shipment_csv(
         _append_audit_payload("shipment_upload", result)
         return result
 
+    if on_upload_start is not None:
+        try:
+            on_upload_start(preview.source_rows)
+        except Exception:
+            pass
+
     paths = find_portal_paths()
     login_client = NextEngineOrderDetailDownloader(
         paths=paths,
         headless=_headless_default() if headless is None else headless,
         slow_mo_ms=slow_mo_ms,
     )
+    dialog_messages: list[str] = []
     with _next_engine_storage_lock():
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(
@@ -448,26 +456,90 @@ async def upload_next_engine_shipment_csv(
                 context = await browser.new_context(**context_kwargs)
                 try:
                     page = await context.new_page()
+                    # NEのアップロード確認ダイアログ(confirm)を必ず承認する。
+                    # 未登録だとPlaywright既定のdismiss(=キャンセル)で送信されないまま
+                    # 「完了」扱いになる（2026-07-21の未反映障害の一因）。
+                    async def _accept_dialog(dialog) -> None:
+                        dialog_messages.append(str(dialog.message or "")[:200])
+                        await dialog.accept()
+
+                    page.on("dialog", lambda dialog: asyncio.create_task(_accept_dialog(dialog)))
                     await login_client._login(page)
                     await page.goto(NEXT_ENGINE_SHIPMENT_UPLOAD_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
-                    await page.locator(
-                        'input[type="file"][name="_n_file"], input[name="_n_file"], input#_n_file'
-                    ).first.set_input_files(str(preview.upload_csv))
-                    await _click_upload_button(page)
+
+                    # Userlogine には入荷実績など複数の _n_file フォームがあるため、
+                    # ページ全体の .first ではなく「出荷実績データ」フォーム
+                    # （action=/Userlogine/syukkaup。PAD原本と同じ特定方法）にスコープする。
+                    upload_form = await _locate_shipment_upload_form(page)
+                    file_input = upload_form.locator(
+                        'input[name="_n_file"], input[type="file"]'
+                    ).first
+                    await file_input.set_input_files(str(preview.upload_csv), timeout=15000)
+                    attached = await file_input.evaluate(
+                        "(el) => el.files ? el.files.length : 0"
+                    )
+                    if attached != 1:
+                        raise RuntimeError(
+                            "出荷実績フォームへのファイル添付を確認できませんでした。"
+                        )
+
+                    menu_url = page.url
+                    text_before_click = await _page_text_excerpt(page)
+                    await _click_upload_button(upload_form)
+
+                    # 成功確認: フォームは /Userlogine/syukkaup へ送信される。
+                    # URL変化を待ち、変化が無ければ本文の変化も見る（どちらも無ければ未反映）。
+                    upload_confirmed = False
+                    try:
+                        await page.wait_for_url("**/syukkaup*", timeout=30000)
+                        upload_confirmed = True
+                    except PlaywrightTimeoutError:
+                        pass
                     await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
                     await page.wait_for_timeout(1500)
                     confirmation_text = await _page_text_excerpt(page)
+                    if not upload_confirmed:
+                        upload_confirmed = (
+                            page.url != menu_url or confirmation_text != text_before_click
+                        )
+                    if not upload_confirmed:
+                        await _save_upload_debug_artifacts(page)
                     await context.storage_state(path=str(STORAGE_STATE_PATH))
                 finally:
                     await context.close()
             finally:
                 await browser.close()
 
+    extra_warnings: list[str] = []
+    if dialog_messages:
+        extra_warnings.append(
+            "確認ダイアログを自動承認しました: " + " / ".join(dialog_messages[:3])
+        )
+    if not upload_confirmed:
+        # クリック後にURL・本文が一切変化していない＝送信されていない可能性が高い。
+        # 「反映しました」と誤表示せず、ジョブを失敗として明示する。
+        result = _replace_upload_result(
+            preview,
+            executed=True,
+            confirmation_text=confirmation_text,
+            skipped_reason="upload_not_confirmed",
+            warnings=(
+                *preview.warnings,
+                *extra_warnings,
+                "アップロード後の画面変化を確認できませんでした（未反映の可能性が高い）。"
+                "「ブラウザ画面を表示して実行」で再実行し、NEの画面を直接確認してください。",
+            ),
+            audit_path=AUDIT_LOG_PATH,
+        )
+        _append_audit_payload("shipment_upload", result)
+        return result
+
     result = _replace_upload_result(
         preview,
         executed=True,
         confirmation_text=confirmation_text,
         skipped_reason=None,
+        warnings=(*preview.warnings, *extra_warnings),
         audit_path=AUDIT_LOG_PATH,
     )
     _append_audit_payload("shipment_upload", result)
@@ -482,6 +554,7 @@ def upload_next_engine_shipment_csv_sync(
     headless: bool | None = None,
     slow_mo_ms: int = 0,
     preview_limit: int = 20,
+    on_upload_start=None,
 ) -> ShipmentUploadResult:
     return asyncio.run(
         upload_next_engine_shipment_csv(
@@ -491,6 +564,7 @@ def upload_next_engine_shipment_csv_sync(
             headless=headless,
             slow_mo_ms=slow_mo_ms,
             preview_limit=preview_limit,
+            on_upload_start=on_upload_start,
         )
     )
 
@@ -1258,6 +1332,15 @@ def _next_yamato_tracking_path() -> Path:
 
 
 def _latest_completion_csv(warnings: list[str]) -> Path | None:
+    try:
+        directory = find_portal_paths().portal_root.joinpath(*SHIPMENT_COMPLETION_DIR_PARTS)
+    except Exception as exc:
+        warnings.append(f"ポータルパスを解決できません: {exc}")
+        return None
+    return _latest_completion_csv_in(directory, warnings)
+
+
+def _latest_completion_csv_in(directory: Path, warnings: list[str]) -> Path | None:
     """NE反映候補CSVを自動選択する。
 
     候補は yamato_to-ne*.csv のみ（ne-to-yamato*.csv・shipment_confirmation_import.csv・
@@ -1265,12 +1348,11 @@ def _latest_completion_csv(warnings: list[str]) -> Path | None:
     （伝票番号,発送伝票番号,出荷予定日）を持つファイルに限定し、最終更新が最新のものを返す。
     有効ファイルがなければ None（＝ready_to_upload=False）。誤アップロード防止のため
     「最新CSVへのフォールバック」はしない。
+
+    2026-07-22 フリーズ対策: 完成データはOneDrive同期で1,000本超あるため、
+    全件・全行読みは禁止。mtime降順に並べ、ヘッダー行だけを読み、最初に
+    ヘッダーが一致したファイルで打ち切る（結果は従来の「最新の有効ファイル」と同一）。
     """
-    try:
-        directory = find_portal_paths().portal_root.joinpath(*SHIPMENT_COMPLETION_DIR_PARTS)
-    except Exception as exc:
-        warnings.append(f"ポータルパスを解決できません: {exc}")
-        return None
     if not directory.is_dir():
         warnings.append(f"完成データフォルダが見つかりません: {directory}")
         return None
@@ -1285,19 +1367,33 @@ def _latest_completion_csv(warnings: list[str]) -> Path | None:
         warnings.append(f"{SHIPMENT_UPLOAD_FILE_PREFIX}*.csv が見つかりません: {directory}")
         return None
 
-    valid_files: list[Path] = []
+    files.sort(key=lambda path: path.stat().st_mtime, reverse=True)
     for path in files:
-        temp_warnings: list[str] = []
-        headers, _rows = _read_csv_with_headers(path, temp_warnings)
-        if all(header in headers for header in SHIPMENT_UPLOAD_HEADERS):
-            valid_files.append(path)
-    if valid_files:
-        return max(valid_files, key=lambda path: path.stat().st_mtime)
+        headers = _read_csv_header_only(path)
+        if headers and all(header in headers for header in SHIPMENT_UPLOAD_HEADERS):
+            return path
 
     warnings.append(
         "3列ヘッダー（伝票番号,発送伝票番号,出荷予定日）を持つ yamato_to-ne*.csv がありません。"
     )
     return None
+
+
+def _read_csv_header_only(path: Path) -> tuple[str, ...]:
+    """ヘッダー行（1行目）だけを読む。全行読みしない（OneDriveの回収を最小化）。"""
+    for encoding in ("cp932", "utf-8-sig", "utf-8"):
+        try:
+            with path.open("r", encoding=encoding, newline="") as handle:
+                reader = csv.reader(handle)
+                try:
+                    return tuple(cell.strip() for cell in next(reader))
+                except StopIteration:
+                    return tuple()
+        except UnicodeDecodeError:
+            continue
+        except OSError:
+            return tuple()
+    return tuple()
 
 
 def _read_csv_with_headers(path: Path, warnings: list[str]) -> tuple[tuple[str, ...], list[dict[str, str]]]:
@@ -1316,12 +1412,65 @@ def _read_csv_with_headers(path: Path, warnings: list[str]) -> tuple[tuple[str, 
     return tuple(), []
 
 
-async def _click_upload_button(page) -> None:
+SHIPMENT_UPLOAD_FORM_SELECTORS = (
+    # PAD原本（05_ne_apply）と同じ特定方法: 出荷実績データのフォームは
+    # action=/Userlogine/syukkaup（form name=syukkaupup）。
+    'form[action*="syukkaup"]',
+    'form[name="syukkaupup"]',
+)
+SHIPMENT_UPLOAD_BUTTON_SELECTORS = (
+    "button:has-text('出荷実績データCSVをアップロード')",
+    "input[type='submit'][value*='出荷実績データCSV']",
+    "input[type='button'][value*='出荷実績データCSV']",
+)
+
+
+async def _locate_shipment_upload_form(page):
+    """Userlogine ページの「出荷実績データ」アップロードフォームを特定する。
+
+    同ページには入荷実績など複数の _n_file フォームがあるため、ページ全体からの
+    .first 選択は禁止（2026-07-21 の未反映障害: 入荷実績側へ誤添付）。
+    """
+    for selector in SHIPMENT_UPLOAD_FORM_SELECTORS:
+        locator = page.locator(selector)
+        try:
+            if await locator.count() > 0:
+                return locator.first
+        except Exception:
+            continue
+    # フォールバック: 出荷実績アップロードボタンを内包するフォーム
+    for button_selector in SHIPMENT_UPLOAD_BUTTON_SELECTORS:
+        locator = page.locator(f"form:has({button_selector})")
+        try:
+            if await locator.count() > 0:
+                return locator.first
+        except Exception:
+            continue
+    raise RuntimeError(
+        "出荷実績データのアップロードフォームが見つかりません（NEの画面構成が変わった可能性があります）。"
+    )
+
+
+async def _save_upload_debug_artifacts(page) -> None:
+    """未反映疑い時の切り分け用に、クリック後画面のスクショとHTMLを保存する。"""
+    try:
+        debug_dir = AUDIT_LOG_DIR / "debug"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        await page.screenshot(
+            path=str(debug_dir / f"upload_not_confirmed_{stamp}.png"), full_page=True
+        )
+        (debug_dir / f"upload_not_confirmed_{stamp}.html").write_text(
+            await page.content(), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+async def _click_upload_button(scope) -> None:
     candidates = [
-        page.get_by_role("button", name="出荷実績データCSVをアップロード"),
-        page.locator("button:has-text('出荷実績データCSVをアップロード')"),
-        page.locator("input[type='submit'][value*='出荷実績データCSV']"),
-        page.locator("input[type='button'][value*='出荷実績データCSV']"),
+        scope.get_by_role("button", name="出荷実績データCSVをアップロード"),
+        *(scope.locator(selector) for selector in SHIPMENT_UPLOAD_BUTTON_SELECTORS),
     ]
     for locator in candidates:
         try:

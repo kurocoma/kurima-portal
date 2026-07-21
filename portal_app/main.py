@@ -1374,6 +1374,16 @@ async def shipment_confirmation_upload_start(request: Request):
 
     def worker(job_id: str) -> None:
         progress_jobs.update_step(job_id, "check", status="running")
+
+        def _on_upload_start(source_rows: int) -> None:
+            # ブラウザ操作（数十秒）中も「候補CSV検証のまま固まって見える」のを防ぐ。
+            progress_jobs.update_step(
+                job_id, "check", status="completed", detail=f"{source_rows}件"
+            )
+            progress_jobs.update_step(
+                job_id, "upload", status="running", detail="NEへアップロード中（ブラウザ操作）"
+            )
+
         result = upload_next_engine_shipment_csv_sync(
             execute=execute,
             confirm_upload=confirm_upload,
@@ -1381,6 +1391,7 @@ async def shipment_confirmation_upload_start(request: Request):
             headless=not headed,
             slow_mo_ms=slow_mo_ms,
             preview_limit=preview_limit,
+            on_upload_start=_on_upload_start if execute else None,
         )
         if not result.ready_to_upload:
             progress_jobs.update_step(job_id, "check", status="failed")
@@ -1403,9 +1414,17 @@ async def shipment_confirmation_upload_start(request: Request):
                 progress_jobs.update_step(
                     job_id, "upload", status="failed", detail=result.skipped_reason
                 )
+                reason_text = {
+                    "upload_not_confirmed": "アップロード後の画面変化を確認できず、未反映の可能性が高い",
+                    "confirmation_required": "確認チェックが必要",
+                    "upload_csv_not_ready": "候補CSVが反映可能な状態でない",
+                }.get(result.skipped_reason or "", result.skipped_reason or "理由不明")
+                warning_tail = (
+                    " " + " / ".join(list(result.warnings)[-2:]) if result.warnings else ""
+                )
                 progress_jobs.fail(
                     job_id,
-                    f"ネクストエンジンへの反映が完了しませんでした（{result.skipped_reason or '理由不明'}）。",
+                    f"ネクストエンジンへの反映が完了しませんでした（{reason_text}）。{warning_tail}",
                 )
                 return
         progress_jobs.finish(
