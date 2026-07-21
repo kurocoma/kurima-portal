@@ -67,6 +67,7 @@ exports/
 # Evaluation and local agent artifacts
 validation/runs/
 validation/reference/
+.mso/
 .loop/
 .codex/
 GOAL.md
