@@ -85,8 +85,9 @@ async def inspect_yamato_order_list(
     order_numbers_filter: tuple[str, ...] = tuple(),
     headless: bool | None = None,
     slow_mo_ms: int = 0,
+    profile: YamatoFlowProfile = YAMATO_PROFILE,
 ) -> YamatoOrderListSnapshot:
-    client = NextEngineYamatoClient(headless=headless, slow_mo_ms=slow_mo_ms)
+    client = NextEngineYamatoClient(headless=headless, slow_mo_ms=slow_mo_ms, profile=profile)
     return await client.inspect_order_list(order_numbers_filter=order_numbers_filter)
 
 
@@ -95,12 +96,14 @@ def inspect_yamato_order_list_sync(
     order_numbers_filter: tuple[str, ...] = tuple(),
     headless: bool | None = None,
     slow_mo_ms: int = 0,
+    profile: YamatoFlowProfile = YAMATO_PROFILE,
 ) -> YamatoOrderListSnapshot:
     return asyncio.run(
         inspect_yamato_order_list(
             order_numbers_filter=order_numbers_filter,
             headless=headless,
             slow_mo_ms=slow_mo_ms,
+            profile=profile,
         )
     )
 

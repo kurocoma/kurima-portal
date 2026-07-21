@@ -69,6 +69,7 @@ from portal_app.services.next_engine_downloader import (
     download_next_engine_order_details_sync,
 )
 from portal_app.services.next_engine_order_status import restore_next_engine_print_wait_batch_sync
+from portal_app.services.next_engine_yamato import inspect_yamato_order_list_sync
 from portal_app.log_paths import error_log_file_name, run_log_file_name
 from portal_app.services.paths import candidate_portal_roots, find_portal_paths, latest_order_csv
 from portal_app.services.progress_jobs import (
@@ -2436,6 +2437,70 @@ async def yamato_run_selected_start(request: Request):
         },
     )
     return {"job_id": job_id}
+
+
+@app.post("/yamato/inspect/start")
+async def yamato_inspect_start(request: Request):
+    # 対象チェック（dry-run）: NEの受注一覧を検索して対象伝票番号を表示するだけ。
+    # 納品書PDF取得・CSV取得は行わず、NEの状態は一切変更しない。
+    # ヤマト/ネコポス共通（mode でプロファイルを切替。ヘッド付き実行に対応）。
+    form = await _read_form(request)
+    profile = profile_for_mode(form.get("mode"))
+    headed = _form_headed(form)
+    slow_mo_ms = _form_int(form, "slow_mo_ms", 150 if headed else 0)
+
+    steps = [("inspect", "NEの対象受注を確認")]
+
+    def worker(job_id: str) -> None:
+        progress_jobs.update_step(job_id, "inspect", status="running")
+        try:
+            snapshot = inspect_yamato_order_list_sync(
+                headless=not headed,
+                slow_mo_ms=slow_mo_ms,
+                profile=profile,
+            )
+        except Exception:
+            progress_jobs.update_step(job_id, "inspect", status="failed")
+            raise
+        orders_text = ", ".join(snapshot.order_numbers[:30]) + (
+            " ..." if snapshot.count > 30 else ""
+        )
+        progress_jobs.update_step(
+            job_id, "inspect", status="completed", detail=f"{snapshot.count}件"
+        )
+        progress_jobs.finish(
+            job_id,
+            message=(
+                f"{profile.label}の対象受注は {snapshot.count} 件です"
+                + (f": {orders_text}" if orders_text.strip(" .") else "")
+                + "（NEの状態は変更していません）。"
+            ),
+            result={
+                "count": snapshot.count,
+                "order_numbers": list(snapshot.order_numbers[:50]),
+                "mode": profile.key,
+            },
+        )
+
+    job_id = progress_jobs.start(
+        title=f"{profile.label} 対象チェック",
+        steps=steps,
+        worker=worker,
+        workflow=f"{profile.key}_inspect",
+        metadata={"headed": headed, "mode": profile.key},
+    )
+    return {"job_id": job_id}
+
+
+@app.post("/yamato/inspect", response_class=HTMLResponse)
+async def yamato_inspect(request: Request):
+    # JS無効時のフォールバック: ジョブを開始して元のカードへ戻る（進捗は /jobs で確認できる）。
+    form = await _read_form(request)
+    profile = profile_for_mode(form.get("mode"))
+    await yamato_inspect_start(request)
+    return RedirectResponse(
+        url="/nekopos" if profile.key == "nekopos" else "/yamato", status_code=303
+    )
 
 
 @app.post("/yamato/restore-print-wait", response_class=HTMLResponse)
