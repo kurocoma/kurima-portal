@@ -22,18 +22,6 @@
 {% endif %}
 
 <section class="panel{% if error %} mt-14{% endif %}">
-  <h2 class="panel-title">対象受注をチェック（実行前の確認）</h2>
-  <p class="panel-lead">NEを検索して、いまの対象伝票番号を表示します。<strong>納品書印刷やCSV取得は行わず、NEの状態は変更しません。</strong><br>
-  ブラウザ画面を見ながら実行したいときは、下の「詳細設定（通常は変更不要）」の「ブラウザ画面を表示して実行」をチェックしてください（一括実行・CSV作成・このチェックすべてに効きます）。</p>
-  <form method="post" action="/yamato/inspect" data-progress-form data-progress-endpoint="/yamato/inspect/start" data-settings-from="yamato-csv-form">
-    <input type="hidden" name="mode" value="{{ mode }}">
-    <div class="btn-row" style="margin-top:0;">
-      <button class="btn" type="submit">対象受注をチェック</button>
-    </div>
-  </form>
-</section>
-
-<section class="panel mt-14">
   <h2 class="panel-title">CSV作成からB2取込まで一括実行</h2>
   <p class="panel-lead">「ヤマト用CSVを作成する」と「B2へ取込んで印刷する」を続けて自動実行します。完了後は開いたChromeで印刷だけ行ってください。</p>
   <div class="flow">
@@ -263,9 +251,7 @@
 // ここではページ固有の設定だけを渡す（U7: 進捗JSの共通化）。
 window.KURIMA_PROGRESS = {
   // このページで開始しうる workflow（リロード時の再アタッチ対象。U4。mode ごとに分離）
-  workflows: ["{{ mode }}_run_selected", "{{ mode }}_run_full", "{{ mode }}_b2_open", "{{ mode }}_inspect"],
-  // 対象チェックは結果（対象件数・伝票番号）を画面に残すため、完了時に再読込しない
-  completeRedirectSkip: ["{{ mode }}_inspect"],
+  workflows: ["{{ mode }}_run_selected", "{{ mode }}_run_full", "{{ mode }}_b2_open"],
   startTitle: "{{ 'ヤマト用CSV作成' if mode == 'yamato' else mode_label ~ '用CSV作成' }}",
   // prepare=受注取得〜CSV作成(チップ①〜⑤), b2_open/open/b2_import=B2取込(チップ⑥)
   stepChips: { ne_fetch: [1], invoice: [2], custom: [3], conversion: [4, 5], b2_open: [6], open: [6], b2_import: [6] },

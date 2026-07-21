@@ -9,8 +9,6 @@
  *   startTitle:        送信直後に出す仮タイトル（既定 "処理状況"）
  *   stepChips:         ステップkey → フローチップ番号（数値 or 配列）の対応表
  *   completeRedirect:  完了時の遷移先URL。"reload" で現在URLの再読込。無指定で遷移なし
- *   completeRedirectSkip: 完了時リダイレクトを行わない workflow 名の配列
- *                      （対象チェック等、結果メッセージを画面に残したいジョブ用）
  *   completeMessage:   完了時に message へ上書きする文言
  *   settingsShareKeys: data-settings-from 参照時に共有するフォームキー（ヤマト一括実行）
  *   renderResult:      (job, resultEl) => void  結果表示の描画（クリックポスト/出荷確定）
@@ -244,11 +242,7 @@
     resetCancelButton();
     const kind = currentJobKind;
     currentJobKind = null;
-    if (
-      job.status === "completed" &&
-      config.completeRedirect &&
-      !(config.completeRedirectSkip || []).includes(job.workflow)
-    ) {
+    if (job.status === "completed" && config.completeRedirect) {
       if (config.completeMessage) message.textContent = config.completeMessage;
       setTimeout(() => {
         window.location.assign(
