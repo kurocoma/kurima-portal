@@ -7,8 +7,8 @@
   <h1 class="page-title">{{ mode_label }}</h1>
   <svg class="page-wave" width="62" height="8" viewBox="0 0 62 8" fill="none"><path d="M2 5C8 1.5 13 1.5 19 5s11 3.5 17 0 11-3.5 17 0 5 1 5 1" stroke="#3bb0d4" stroke-width="2" stroke-linecap="round"/></svg>
   {% if mode == "nekopos" %}
-    <p class="page-lead">オリジナルステータス「ネコポス」の受注（保存検索・印刷待ち）から、ヤマトB2の取込データを作成します。<br>
-    送り状種別はネコポス(7)で出力し、温度区分・配達指定日・時間指定・代引額は自動で空欄化します。</p>
+    <p class="page-lead">オリジナルステータス「ネコポス」の受注から、ヤマトB2の取込データを作成します。<br>
+    送り状種別はネコポス(A)で出力し、温度区分・配達指定日・時間指定・代引額は自動で空欄化します。</p>
   {% else %}
     <p class="page-lead">印刷待ちの受注からヤマトB2の取込データを作成します。</p>
   {% endif %}
@@ -23,17 +23,12 @@
 
 <section class="panel{% if error %} mt-14{% endif %}">
   <h2 class="panel-title">対象受注をチェック（実行前の確認）</h2>
-  <p class="panel-lead">NEを検索して、いまの対象伝票番号を表示します。<strong>納品書印刷やCSV取得は行わず、NEの状態は変更しません。</strong></p>
-  <form method="post" action="/yamato/inspect" data-progress-form data-progress-endpoint="/yamato/inspect/start">
+  <p class="panel-lead">NEを検索して、いまの対象伝票番号を表示します。<strong>納品書印刷やCSV取得は行わず、NEの状態は変更しません。</strong><br>
+  ブラウザ画面を見ながら実行したいときは、下の「詳細設定（通常は変更不要）」の「ブラウザ画面を表示して実行」をチェックしてください（一括実行・CSV作成・このチェックすべてに効きます）。</p>
+  <form method="post" action="/yamato/inspect" data-progress-form data-progress-endpoint="/yamato/inspect/start" data-settings-from="yamato-csv-form">
     <input type="hidden" name="mode" value="{{ mode }}">
     <div class="btn-row" style="margin-top:0;">
       <button class="btn" type="submit">対象受注をチェック</button>
-      <label class="opt plain" style="display:inline-flex;margin:0;">
-        <input type="checkbox" name="headed" value="on">
-        <span>
-          <strong class="opt-title">ブラウザ画面を表示して実行</strong>
-        </span>
-      </label>
     </div>
   </form>
 </section>

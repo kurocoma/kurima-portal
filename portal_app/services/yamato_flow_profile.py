@@ -71,8 +71,13 @@ YAMATO_PROFILE = YamatoFlowProfile(
     clear_unsupported_columns=False,
 )
 
-# B2クラウドの送り状種別コード: ネコポス=7（検証用受注の実CSVで確認のうえ運用開始する）
-NEKOPOS_INVOICE_TYPE = "7"
+# B2クラウドの送り状種別コード: ネコポス=**A**（2026-07-21 B2実機のJS定数
+# SERVICE_TYPE_NEKOPOS_CD='A' から取得）。「7」は現行B2では**クロネコゆうパケット**
+# （SERVICE_TYPE_YUPACKET_CD='7'）に割り当てられており、NEカスタムパターンが出力する
+# 「7」をそのまま通すとゆうパケット扱いで取り込まれる（実障害で確認）。
+# 参考: 0=発払い 1=EAZY 2=コレクト 3=クロネコゆうメール 4=タイム 6=発払い(複数口)
+#       7=クロネコゆうパケット 8=宅急便コンパクト 9=コンパクトコレクト A=ネコポス
+NEKOPOS_INVOICE_TYPE = "A"
 # NEのオリジナルステータス「ネコポス」のID（受注一覧のバッジ #original_status_118 から確認）
 NEKOPOS_ORIGINAL_STATUS_ID = 118
 

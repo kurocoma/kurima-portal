@@ -53,7 +53,8 @@ class ProfileDefinitionTest(unittest.TestCase):
         )
         self.assertEqual(NEKOPOS_PROFILE.original_status_id, 118)
         self.assertEqual(NEKOPOS_PROFILE.shipping_options, tuple())  # 再検索スキップ
-        self.assertEqual(NEKOPOS_PROFILE.invoice_type_override, "7")
+        # B2実機のJS定数(SERVICE_TYPE_NEKOPOS_CD)で確定: ネコポス=A（7はクロネコゆうパケット）
+        self.assertEqual(NEKOPOS_PROFILE.invoice_type_override, "A")
         self.assertTrue(NEKOPOS_PROFILE.clear_unsupported_columns)
 
     def test_prefixes_are_separated_from_yamato(self):
@@ -86,23 +87,24 @@ class ProfileDefinitionTest(unittest.TestCase):
 
 class NekoposTransformTest(unittest.TestCase):
     def test_invoice_type_override_with_warning(self):
-        """送り状種別0（発払い）→7へ上書きし、変更前の値を警告に明示する。"""
-        source = _frame([_source_row(送り状種別="0")])
-        converted, warnings_out, _r, _a = transform_ne_to_yamato(
-            source, {}, profile=NEKOPOS_PROFILE
-        )
-        self.assertEqual(converted.iloc[0]["送り状種別"], "7")
-        override_warnings = [w for w in warnings_out if "送り状種別" in w]
-        self.assertEqual(len(override_warnings), 1)
-        self.assertIn("0", override_warnings[0])
-
-    def test_invoice_type_already_nekopos_no_warning(self):
-        """既に7なら変更なし・警告なし（NEパターンが7を出す場合は静かに通る）。"""
+        """NEパターンが出す「7」（現B2ではゆうパケット）をネコポス「A」へ上書きし、
+        変更前の値を警告に明示する（2026-07-21 実障害: 7のまま取り込むとゆうパケット扱い）。"""
         source = _frame([_source_row(送り状種別="7")])
         converted, warnings_out, _r, _a = transform_ne_to_yamato(
             source, {}, profile=NEKOPOS_PROFILE
         )
-        self.assertEqual(converted.iloc[0]["送り状種別"], "7")
+        self.assertEqual(converted.iloc[0]["送り状種別"], "A")
+        override_warnings = [w for w in warnings_out if "送り状種別" in w]
+        self.assertEqual(len(override_warnings), 1)
+        self.assertIn("7", override_warnings[0])
+
+    def test_invoice_type_already_nekopos_no_warning(self):
+        """既にAなら変更なし・警告なし。"""
+        source = _frame([_source_row(送り状種別="A")])
+        converted, warnings_out, _r, _a = transform_ne_to_yamato(
+            source, {}, profile=NEKOPOS_PROFILE
+        )
+        self.assertEqual(converted.iloc[0]["送り状種別"], "A")
         self.assertFalse(any("送り状種別" in w for w in warnings_out))
 
     def test_unsupported_columns_cleared_with_suspicious_warning(self):
