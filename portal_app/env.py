@@ -5,6 +5,7 @@ from pathlib import Path
 
 
 APP_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_LOCAL_ENV_PATH = APP_ROOT / ".env.local"
 DEFAULT_ENV_PATH = APP_ROOT / ".env"
 DEFAULT_EXTRA_ENV_PATHS = (
     APP_ROOT / ".env.yamato-b2",
@@ -13,9 +14,13 @@ DEFAULT_EXTRA_ENV_PATHS = (
 
 
 def load_env_file(path: Path | str | None = None, *, override: bool = False) -> None:
-    """Load KEY=VALUE pairs from a local .env file without adding a dependency."""
+    """Load KEY=VALUE pairs from a local .env file without adding a dependency.
+
+    .env.local は個人環境固有の値（gitignore対象）として .env より先に読み、
+    override=False の既定では先勝ちのため .env.local の値が .env より優先される。
+    """
     if path is None:
-        for env_path in (DEFAULT_ENV_PATH, *DEFAULT_EXTRA_ENV_PATHS):
+        for env_path in (DEFAULT_LOCAL_ENV_PATH, DEFAULT_ENV_PATH, *DEFAULT_EXTRA_ENV_PATHS):
             _load_env_path(env_path, override=override)
         return
 

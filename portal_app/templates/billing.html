@@ -1,0 +1,343 @@
+{% extends "base.html" %}
+{% block title %}請求関連取得 - くりまポータルツール{% endblock %}
+{% block content %}
+{# 結果マークアップは _billing_results.html と同期して更新する。 #}
+{#
+  請求関連取得（/billing）テンプレート案
+  - inventory.html のタブ・パネル・進捗・遅延ロードのパターンをそのまま踏襲
+  - styles.css への新規クラス追加なし
+  - 結果一覧の初期表示は「帳票・状態・行数」に絞り、SHA-256等は .fold に収める
+  - 社名・金額・精算書番号は表示しない（settings と同じマスク方針）
+#}
+<div class="page-head">
+  <h1 class="page-title">請求関連取得</h1>
+  <svg class="page-wave" width="62" height="8" viewBox="0 0 62 8" fill="none"><path d="M2 5C8 1.5 13 1.5 19 5s11 3.5 17 0 11-3.5 17 0 5 1 5 1" stroke="#3bb0d4" stroke-width="2" stroke-linecap="round"/></svg>
+  <p class="page-lead">Yahoo!ショッピングの精算・請求・受取明細と、楽天BillPayの精算データを取得します。</p>
+</div>
+
+{% if error %}
+  <div class="note error">
+    <div class="note-title">処理が止まりました</div>
+    <p>{{ error }}</p>
+  </div>
+{% endif %}
+
+{% set current_tab = active_tab|default("yahoo") %}
+<nav class="tabbar" aria-label="取得先の切り替え">
+  <a class="tablink{% if current_tab == 'yahoo' %} is-active{% endif %}" href="/billing">Yahoo!ショッピング</a>
+  <a class="tablink{% if current_tab == 'rakuten' %} is-active{% endif %}" href="/billing?tab=rakuten">楽天市場（BillPay）</a>
+</nav>
+
+{% if current_tab == "yahoo" %}
+<section class="panel center{% if error %} mt-14{% endif %}">
+  <h2 class="panel-title">Yahoo!ショッピングの明細を取得する</h2>
+  <p class="panel-lead">ストアクリエイターProから、精算・請求・受取の各明細CSVを取得します。金額の集計はこの画面では行いません。</p>
+  <div class="flow center">
+    <span class="flow-chip" data-chip="1"><span class="flow-num">1</span>ログイン確認</span>
+    <span class="flow-chip" data-chip="2"><span class="flow-num">2</span>対象月と確定状態の確認</span>
+    <span class="flow-chip" data-chip="3"><span class="flow-num">3</span>帳票のダウンロード</span>
+    <span class="flow-chip" data-chip="4"><span class="flow-num">4</span>検証・保存</span>
+  </div>
+
+  <form method="post" action="/billing/yahoo" data-progress-form data-progress-endpoint="/billing/yahoo/start">
+    <div class="field-row" style="justify-content:center;margin-top:20px">
+      <label class="field">
+        <span class="field-label">対象年月</span>
+        {# default_target_month はサーバ側で前月を設定（例: "2026-06"） #}
+        <input class="input w-150" type="month" name="target_month" value="{{ default_target_month }}">
+      </label>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-top:14px">
+      <label class="opt" style="flex:0 1 auto;align-items:center"><input type="checkbox" name="types" value="settlement" checked style="margin-top:0"><span class="opt-title">精算明細</span></label>
+      <label class="opt" style="flex:0 1 auto;align-items:center"><input type="checkbox" name="types" value="billing" checked style="margin-top:0"><span class="opt-title">請求明細</span></label>
+      <label class="opt" style="flex:0 1 auto;align-items:center"><input type="checkbox" name="types" value="receipt" checked style="margin-top:0"><span class="opt-title">受取明細</span></label>
+    </div>
+    <div style="max-width:440px;margin:12px auto 0;text-align:left">
+      <label class="opt">
+        <input type="checkbox" name="final_only" value="1" checked>
+        <span>
+          <span class="opt-title">確定済みのみ取得</span>
+          <span class="opt-desc">金額が変わる可能性のある「未確定」の月は取得せず、お知らせして止まります。</span>
+        </span>
+      </label>
+    </div>
+    <div class="cta-wrap">
+      <button class="btn-cta" type="submit">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
+        明細CSVを取得
+      </button>
+      <span class="run-note">所要 約3分／選んだ帳票の数だけCSVを保存します</span>
+    </div>
+  </form>
+</section>
+
+{% if defer_preview %}
+  <div class="lazy-slot" data-lazy="/billing/preview?tab=yahoo">
+    <span class="lazy-spinner" aria-hidden="true"></span>前回の取得結果を読み込み中…
+  </div>
+{% else %}
+  {# ===== Yahoo!タブ 結果セクション =====
+     想定コンテキスト:
+       result.target_month_label … "2026年6月分"
+       result.warnings           … 現場向け文言のリスト（未確定スキップ等）
+       result.files … [{type_label, state("final"/"provisional"/"unknown"/"no_data"),
+                        row_count|None, artifact_id|None, filename|None, sha8|None,
+                        closing_date_label|None}]
+     状態の見せ方: final=tag-ok「確定」/ provisional=tag-need「未確定・取得せず」/
+                   unknown=tag-need「状態を確認できず」/ no_data=badge「データなし」
+  #}
+  {% if result %}
+    {% set dl_count = result.files|selectattr("artifact_id")|list|length %}
+    <div class="result-bar">
+      {% if dl_count >= 1 %}
+        <span class="tag-ok">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2f7d57" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+          {{ result.target_month_label }}の明細を{{ dl_count }}件取得済み
+        </span>
+      {% else %}
+        <span class="tag-need">{{ result.target_month_label }}の明細は未取得です</span>
+      {% endif %}
+      <span class="result-sub">{{ result.fetched_at_label }} 取得</span>
+    </div>
+    {% if result.warnings %}
+      <div class="note warn" style="margin-bottom:14px">
+        <div class="note-title">確認事項</div>
+        <ul class="note-list">
+          {% for warning in result.warnings %}<li>{{ warning }}</li>{% endfor %}
+        </ul>
+      </div>
+    {% endif %}
+    <div class="tbl-wrap">
+      <div class="tbl-scroll">
+        <table class="tbl tbl-min-560">
+          <thead>
+            <tr><th>帳票</th><th>状態</th><th class="num">行数</th><th>ダウンロード</th></tr>
+          </thead>
+          <tbody>
+            {% for file in result.files %}
+              <tr{% if file.state == "provisional" %} class="row-need"{% endif %}>
+                <td{% if file.state == "provisional" %} class="cell-need"{% endif %}>{{ file.type_label }}（{{ result.target_month_label }}）</td>
+                <td>
+                  {% if file.state == "final" %}
+                    <span class="tag-ok"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#2f7d57" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>確定</span>
+                  {% elif file.state == "provisional" %}
+                    <span class="tag-need">未確定・取得せず</span>
+                  {% elif file.state == "unknown" %}
+                    <span class="tag-need">状態を確認できず</span>
+                  {% else %}
+                    <span class="badge">データなし</span>
+                  {% endif %}
+                </td>
+                <td class="num">{% if file.row_count is not none %}{{ "{:,}".format(file.row_count) }}{% else %}—{% endif %}</td>
+                <td>{% if file.artifact_id %}<a class="file-link" href="/billing/download/yahoo/{{ file.artifact_id }}">CSVをダウンロード</a>{% else %}—{% endif %}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="4" class="empty">まだ取得していません</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% if dl_count >= 1 %}
+      <div class="btn-row" style="justify-content:flex-end">
+        {# /billing/download/yahoo/all はZIP一括ダウンロード（要ルーティング追加） #}
+        <a class="btn btn-primary" href="/billing/download/yahoo/all">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
+          取得済み{{ dl_count }}件をまとめてダウンロード
+        </a>
+      </div>
+    {% endif %}
+    <details class="fold mt-14">
+      <summary>取得の詳細（技術情報）<span class="fold-hint">開閉</span></summary>
+      <div class="fold-body">
+        <dl class="kv narrow">
+          <dt>保存先</dt>
+          <dd class="mono">{{ result.staging_dir }}</dd>
+          {% for file in result.files %}
+            <dt>{{ file.type_label }}</dt>
+            {% if file.filename %}
+              <dd class="mono">{{ file.filename }}（照合コード {{ file.sha8 }}{% if file.closing_date_label %}・締め日 {{ file.closing_date_label }}{% endif %}）</dd>
+            {% elif file.state == "provisional" %}
+              <dd>未確定のため未取得</dd>
+            {% else %}
+              <dd>対象月のデータなし</dd>
+            {% endif %}
+          {% endfor %}
+          <dt>検証</dt>
+          <dd>項目・対象月・行数（画面の表示件数との照合）を確認済み</dd>
+        </dl>
+      </div>
+    </details>
+  {% endif %}
+{% endif %}
+{% else %}
+<section class="panel center{% if error %} mt-14{% endif %}">
+  <h2 class="panel-title">楽天BillPayの精算データを取得する</h2>
+  <p class="panel-lead">BillPayから店舗別内訳書CSVを取得します。社名・金額はこの画面には表示しません。</p>
+  <div class="flow center">
+    <span class="flow-chip" data-chip="1"><span class="flow-num">1</span>ログイン確認</span>
+    <span class="flow-chip" data-chip="2"><span class="flow-num">2</span>精算回の一覧表示</span>
+    <span class="flow-chip" data-chip="3"><span class="flow-num">3</span>帳票のダウンロード</span>
+    <span class="flow-chip" data-chip="4"><span class="flow-num">4</span>検証・保存</span>
+  </div>
+
+  <form method="post" action="/billing/rakuten" data-progress-form data-progress-endpoint="/billing/rakuten/start">
+    <div class="field-row" style="justify-content:center;margin-top:20px">
+      <label class="field">
+        <span class="field-label">画面</span>
+        <select class="select" name="screen">
+          <option value="settlement_result">確定済み精算</option>
+          <option value="billing_check">事前確認</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="field-label">取得範囲</span>
+        <select class="select" name="scope" id="billpay-scope">
+          <option value="latest">最新1件</option>
+          <option value="date">発行日を指定</option>
+          <option value="all">全件（直近18か月）</option>
+        </select>
+      </label>
+      <label class="field" id="billpay-issue-date" hidden>
+        <span class="field-label">発行日</span>
+        <input class="input w-150" type="date" name="issue_date">
+      </label>
+    </div>
+    <div class="cta-wrap">
+      <button class="btn-cta" type="submit">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
+        精算データを取得
+      </button>
+      <span class="run-note">所要 最新1件 約2分／全件 約20分</span>
+    </div>
+  </form>
+</section>
+
+{% if defer_preview %}
+  <div class="lazy-slot" data-lazy="/billing/preview?tab=rakuten">
+    <span class="lazy-spinner" aria-hidden="true"></span>前回の取得結果を読み込み中…
+  </div>
+{% else %}
+  {# ===== 楽天BillPayタブ 結果セクション =====
+     想定コンテキスト:
+       result.documents … [{issue_date, doc_label("店舗別内訳書CSV（確定済み精算）"等),
+                            validated(bool), artifact_id, filename, sha8}]
+     社名・金額・精算書番号は manifest に平文で持たない（表示もしない）。
+  #}
+  {% if result %}
+    <div class="result-bar">
+      {% if result.documents|length >= 1 %}
+        <span class="tag-ok">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2f7d57" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+          BillPay帳票を{{ result.documents|length }}件取得済み
+        </span>
+      {% else %}
+        <span class="tag-need">対象となるBillPay帳票はありませんでした</span>
+      {% endif %}
+      <span class="result-sub">{{ result.fetched_at_label }} 取得</span>
+    </div>
+    {% if result.warnings %}
+      <div class="note warn" style="margin-bottom:14px">
+        <div class="note-title">確認事項</div>
+        <ul class="note-list">
+          {% for warning in result.warnings %}<li>{{ warning }}</li>{% endfor %}
+        </ul>
+      </div>
+    {% endif %}
+    <div class="tbl-wrap">
+      <div class="tbl-scroll">
+        <table class="tbl tbl-min-560">
+          <thead>
+            <tr><th>発行日</th><th>帳票</th><th>状態</th><th>ダウンロード</th></tr>
+          </thead>
+          <tbody>
+            {% for doc in result.documents %}
+              <tr>
+                <td class="mono">{{ doc.issue_date }}</td>
+                <td>{{ doc.doc_label }}</td>
+                <td>
+                  {% if doc.validated %}
+                    <span class="tag-ok"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#2f7d57" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>検証済み</span>
+                  {% else %}
+                    <span class="tag-need">確認が必要</span>
+                  {% endif %}
+                </td>
+                <td><a class="file-link" href="/billing/download/rakuten/{{ doc.artifact_id }}">CSVをダウンロード</a></td>
+              </tr>
+            {% else %}
+              <tr><td colspan="4" class="empty">まだ取得していません</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% if result.documents|length >= 1 %}
+      <div class="btn-row" style="justify-content:flex-end;margin-top:12px">
+        {# /billing/download/rakuten/all はZIP一括ダウンロード（要ルーティング追加） #}
+        <a class="btn btn-primary" href="/billing/download/rakuten/all">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
+          {{ result.documents|length }}件をまとめてダウンロード
+        </a>
+      </div>
+    {% endif %}
+    <p style="margin:10px 2px 0;font-size:12px;color:var(--muted-3)">社名・金額・精算書番号は、この画面と実行履歴には表示されません（設定画面と同じマスク方針）。</p>
+    <details class="fold mt-14">
+      <summary>取得の詳細（技術情報）<span class="fold-hint">開閉</span></summary>
+      <div class="fold-body">
+        <dl class="kv narrow">
+          <dt>保存先</dt>
+          <dd class="mono">{{ result.staging_dir }}</dd>
+          {% for doc in result.documents %}
+            <dt>{{ doc.issue_date }}</dt>
+            <dd class="mono">{{ doc.filename }}（照合コード {{ doc.sha8 }}）</dd>
+          {% endfor %}
+          <dt>検証</dt>
+          <dd>帳票種別ごとの列・文字コード・ファイル形式の検証結果を記録</dd>
+        </dl>
+      </div>
+    </details>
+  {% endif %}
+{% endif %}
+{% endif %}
+
+<div id="progress-panel" class="progress-panel mt-14" hidden>
+  <div class="progress-head">
+    <div>
+      <h2 id="progress-title">処理状況</h2>
+      <p id="progress-message" class="progress-message">開始待ちです。</p>
+    </div>
+    <div class="progress-head-actions">
+      <span id="progress-status" class="badge">待機中</span>
+      <button type="button" id="progress-cancel" class="btn-stop" hidden>実行を中止</button>
+    </div>
+  </div>
+  <ol id="progress-steps" class="progress-steps"></ol>
+  <p id="progress-error" class="progress-error" hidden></p>
+  <p id="progress-hint" class="progress-hint" hidden></p>
+</div>
+
+<script>
+// 進捗表示は共通スクリプト（/static/progress.js）が担当。ページ固有設定のみ渡す。
+window.KURIMA_PROGRESS = {
+  {% if current_tab == "yahoo" %}
+  workflows: ["billing_statements_yahoo"],
+  stepChips: { login_check: [1], select_month: [2], fetch: [3], validate_save: [4] },
+  {% else %}
+  workflows: ["billing_statements_rakuten"],
+  stepChips: { login_check: [1], list_settlements: [2], fetch: [3], validate_save: [4] },
+  {% endif %}
+  completeRedirect: "reload",
+  completeMessage: "完了しました。結果を表示します…",
+};
+
+// 取得範囲「発行日を指定」のときだけ発行日フィールドを表示する（このページ固有の小さな制御）
+(() => {
+  const scope = document.getElementById("billpay-scope");
+  const issueDate = document.getElementById("billpay-issue-date");
+  if (!scope || !issueDate) return;
+  const sync = () => { issueDate.hidden = scope.value !== "date"; };
+  scope.addEventListener("change", sync);
+  sync();
+})();
+</script>
+{% endblock %}

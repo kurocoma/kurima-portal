@@ -171,6 +171,33 @@ SETTINGS_CATALOG: tuple[tuple[str, tuple[tuple[str, str, bool], ...]], ...] = (
         ),
     ),
     (
+        "アクセス解析・請求関連",
+        (
+            ("KURIMA_ACCESS_ANALYTICS_DIR", "アクセス解析CSVの専用保存先", False),
+            ("KURIMA_BILLING_STATEMENTS_DIR", "請求関連帳票の権限分離した専用保存先", False),
+            ("KURIMA_YAHOO_STORE_ACCOUNT", "Yahoo!ストアアカウント", True),
+            (
+                "KURIMA_ACCESS_ANALYTICS_RAKUTEN_CHROME_PROFILE",
+                "楽天アクセス解析専用ブラウザプロファイル",
+                False,
+            ),
+            (
+                "KURIMA_ACCESS_ANALYTICS_YAHOO_CHROME_PROFILE",
+                "Yahoo!アクセス解析専用ブラウザプロファイル",
+                False,
+            ),
+            (
+                "KURIMA_BILLING_STATEMENTS_YAHOO_CHROME_PROFILE",
+                "Yahoo!請求関連専用ブラウザプロファイル",
+                False,
+            ),
+            ("KURIMA_BILLPAY_CHROME_PROFILE", "楽天BillPay専用ブラウザプロファイル", False),
+            ("KURIMA_BILLPAY_EXPECTED_COMPANY_ID", "BillPay検証用の期待企業ID", True),
+            ("KURIMA_BILLPAY_EXPECTED_SHOP_ID", "BillPay検証用の期待店舗別ID", True),
+            ("KURIMA_BILLPAY_EXPECTED_SHOP_URL", "BillPay検証用の期待店舗URL", True),
+        ),
+    ),
+    (
         "ブラウザ実体（Playwright）",
         (
             ("PLAYWRIGHT_CHROMIUM_EXECUTABLE", "使用ブラウザ実行ファイルの固定", False),

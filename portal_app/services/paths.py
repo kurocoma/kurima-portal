@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from portal_app.services.execution_logger import APP_ROOT
+
 
 COMPANY_FOLDER = "株式会社しまのや"
 LIBRARY_FOLDER = "くりまポータル - ドキュメント"
@@ -115,3 +117,49 @@ def latest_order_csv(order_csv_dir: Path) -> Path:
     if not files:
         raise FileNotFoundError(f"data で始まる受注明細 CSV が見つかりません: {order_csv_dir}")
     return max(files, key=lambda path: path.stat().st_mtime)
+
+
+@dataclass(frozen=True)
+class AccessAnalyticsPaths:
+    root: Path
+    raw_dir: Path
+    staging_dir: Path
+    manifest_path: Path
+
+
+@dataclass(frozen=True)
+class BillingStatementsPaths:
+    root: Path
+    raw_dir: Path
+    staging_dir: Path
+    quarantine_dir: Path
+    manifest_path: Path
+
+
+def find_access_analytics_paths() -> AccessAnalyticsPaths:
+    """アクセス解析の専用保存先を解決する（ディレクトリは作成しない）。"""
+
+    root = _path_from_env("KURIMA_ACCESS_ANALYTICS_DIR") or (
+        APP_ROOT / "data" / "access_analytics"
+    )
+    return AccessAnalyticsPaths(
+        root=root,
+        raw_dir=root / "raw",
+        staging_dir=root / "staging",
+        manifest_path=root / "manifest.jsonl",
+    )
+
+
+def find_billing_statements_paths() -> BillingStatementsPaths:
+    """権限分離する請求関連の専用保存先を解決する（ディレクトリは作成しない）。"""
+
+    root = _path_from_env("KURIMA_BILLING_STATEMENTS_DIR") or (
+        APP_ROOT / "data" / "billing_statements"
+    )
+    return BillingStatementsPaths(
+        root=root,
+        raw_dir=root / "raw",
+        staging_dir=root / "staging",
+        quarantine_dir=root / "quarantine",
+        manifest_path=root / "manifest.jsonl",
+    )

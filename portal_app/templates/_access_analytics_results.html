@@ -1,0 +1,124 @@
+{# access_analytics.html の結果セクションと同期して更新する。 #}
+{% set current_tab = active_tab|default("rakuten") %}
+{% if preview_error %}
+  <div class="note error">
+    <div class="note-title">前回の取得結果を読み込めませんでした</div>
+    <p>{{ preview_error }}</p>
+  </div>
+{% endif %}
+{% if current_tab == "rakuten" %}
+  {# ===== 楽天タブ 結果セクション（/preview 応答と共通化する） =====
+     result（manifest由来）の想定コンテキスト:
+       result.fetched_at_label … "2026-07-11 06:12"
+       result.target_label     … "7月10日分"
+       result.files            … [{device_label, row_count, artifact_id, filename, sha8}] 3件
+  #}
+  {% if result %}
+    <div class="result-bar">
+      <span class="tag-ok">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2f7d57" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+        {{ result.files|length }}件のCSVを取得済み
+      </span>
+      <span class="result-sub">{{ result.fetched_at_label }} 取得（{{ result.target_label }}）</span>
+    </div>
+    {% for file in result.files %}
+      <div class="filecard{% if loop.first %}" style="margin-top:0{% endif %}">
+        <span class="file-icon"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#147f9f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></span>
+        <div class="file-body">
+          <div class="file-name">{{ file.device_label }}</div>
+          <div class="file-sub">{{ "{:,}".format(file.row_count) }}行・{{ file.target_label|default(result.target_label) }}</div>
+        </div>
+        <div class="file-actions"><a class="file-link" href="/access-analytics/download/rakuten/{{ file.artifact_id }}">CSVをダウンロード</a></div>
+      </div>
+    {% endfor %}
+    <div class="btn-row" style="justify-content:flex-end">
+      {# /access-analytics/download/rakuten/all は今回取得分のZIP一括ダウンロード（要ルーティング追加） #}
+      <a class="btn btn-primary" href="/access-analytics/download/rakuten/all">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
+        {{ result.files|length }}件をまとめてダウンロード
+      </a>
+    </div>
+    <details class="fold mt-14">
+      <summary>取得の詳細（技術情報）<span class="fold-hint">開閉</span></summary>
+      <div class="fold-body">
+        <dl class="kv narrow">
+          <dt>保存先</dt>
+          <dd class="mono">{{ result.staging_dir }}</dd>
+          {% for file in result.files %}
+            <dt>{{ file.device_label }}</dt>
+            <dd class="mono">{{ file.filename }}（照合コード {{ file.sha8 }}）</dd>
+          {% endfor %}
+          <dt>検証</dt>
+          <dd>項目（28列）・対象日・端末名の一致を確認済み</dd>
+        </dl>
+      </div>
+    </details>
+  {% endif %}
+{% else %}
+  {# ===== Yahoo!タブ 結果セクション =====
+     想定コンテキスト:
+       result.product … {row_count, artifact_id, filename, sha8}
+       result.overall … [{device_label, artifact_id, filename, sha8}] 4件（PC/スマホWeb/アプリ/合算値）
+  #}
+  {% if result %}
+    <div class="result-bar">
+      <span class="tag-ok">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2f7d57" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+        商品分析＋全体分析{{ result.overall|length }}件を取得済み
+      </span>
+      <span class="result-sub">{{ result.fetched_at_label }} 取得（{{ result.target_label }}）</span>
+    </div>
+    <div class="filecard" style="margin-top:0">
+      <span class="file-icon"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#147f9f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></span>
+      <div class="file-body">
+        <div class="file-name">商品分析CSV</div>
+        <div class="file-sub">{{ "{:,}".format(result.product.row_count) }}行・{{ result.target_label }}（商品別。デバイス区分なし）</div>
+      </div>
+      <div class="file-actions"><a class="file-link" href="/access-analytics/download/yahoo/{{ result.product.artifact_id }}">CSVをダウンロード</a></div>
+    </div>
+    <section class="mt-22">
+      <div class="sec-head">
+        <h2>全体分析（デバイス別）</h2>
+        <span class="badge">{{ result.overall|length }} 件</span>
+      </div>
+      <div class="file-grid" style="margin-top:0">
+        {% for file in result.overall %}
+          <div class="filecard">
+            <span class="file-icon"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#147f9f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></span>
+            <div class="file-body">
+              <div class="file-name">{{ file.device_label }}</div>
+              <div class="file-sub">{{ result.target_label }}{% if file.device_label == "合算値" %}・Yahoo!側の合算CSV{% endif %}</div>
+            </div>
+            <div class="file-actions"><a class="file-link" href="/access-analytics/download/yahoo/{{ file.artifact_id }}">CSV</a></div>
+          </div>
+        {% endfor %}
+      </div>
+    </section>
+    <div class="btn-row" style="justify-content:flex-end">
+      {# /access-analytics/download/yahoo/all は今回取得分のZIP一括ダウンロード（要ルーティング追加） #}
+      <a class="btn btn-primary" href="/access-analytics/download/yahoo/all">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
+        {{ 1 + result.overall|length }}件をまとめてダウンロード
+      </a>
+    </div>
+    <details class="fold mt-14">
+      <summary>取得の詳細（技術情報）<span class="fold-hint">開閉</span></summary>
+      <div class="fold-body">
+        <dl class="kv narrow">
+          <dt>保存先</dt>
+          <dd class="mono">{{ result.staging_dir }}</dd>
+          <dt>商品分析</dt>
+          <dd class="mono">{{ result.product.filename }}（照合コード {{ result.product.sha8 }}）</dd>
+          {% for file in result.overall %}
+            <dt>{{ file.device_label }}</dt>
+            <dd class="mono">{{ file.filename }}（照合コード {{ file.sha8 }}）</dd>
+          {% endfor %}
+          <dt>合算値の扱い</dt>
+          <dd>合計はYahoo!側の「合算値」CSVを正とします（3デバイスの合計とは一致しないことがあります）</dd>
+          <dt>検証</dt>
+          <dd>項目（商品分析14列・全体分析24列）の一致を確認済み</dd>
+        </dl>
+      </div>
+    </details>
+  {% endif %}
+{% endif %}

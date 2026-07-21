@@ -33,6 +33,51 @@ _B2_STATE_HINTS = {
     ),
 }
 
+_PORTAL_FETCH_STATE_HINTS = {
+    "NEEDS_LOGIN": (
+        "ログインが切れています。専用ブラウザで再ログインしてから再実行してください。"
+    ),
+    "AUTH_REQUIRED": (
+        "ログインが切れています。専用ブラウザで再ログインしてから再実行してください。"
+    ),
+    "AUTH_REQUIRED_MANUAL": (
+        "自動ログインでは完了できませんでした（ログインフォームを特定できない、"
+        "または2段階認証等の追加認証が要求されています）。専用ブラウザで人手により"
+        "ログインを完了してから再実行してください。"
+    ),
+    "PAGE_CONTRACT_CHANGED": (
+        "対象サイトの画面構成が変わった可能性があります。証跡を保存済みのため、"
+        "開発担当へ連絡してください。"
+    ),
+    "PAGINATION_STALLED": (
+        "ページ送りが進みませんでした。時間をおいて再実行してください。"
+    ),
+    "SCHEMA_MISMATCH": (
+        "CSV形式が変わった可能性があります。ファイルを変更せず開発担当へ連絡してください。"
+    ),
+    "SCHEMA_DRIFT": (
+        "CSV形式が変わった可能性があります。ファイルを変更せず開発担当へ連絡してください。"
+    ),
+    "NOT_FINALIZED": (
+        "対象月が未確定です。確定後に再実行するか「確定済みのみ」を外してください。"
+    ),
+    "MONTH_UNAVAILABLE": (
+        "指定年月を選択できません。対象年月を確認して再実行してください。"
+    ),
+    "DOCUMENT_TYPE_NOT_ALLOWED": (
+        "未対応の帳票種別です。この帳票は実装対象外のため取得できません。"
+    ),
+    "AMBIGUOUS_DOWNLOAD": (
+        "ダウンロードに失敗しました。時間をおいて再実行してください。"
+    ),
+    "DOWNLOAD_FAILED": (
+        "ダウンロードに失敗しました。時間をおいて再実行してください。"
+    ),
+    "SESSION_RENEWAL_REQUIRED": (
+        "セッション期限が近いため安全停止しました。再ログイン後に再実行してください。"
+    ),
+}
+
 
 def hint_for_exception(exc: BaseException | None) -> str | None:
     """例外オブジェクトから対処ガイド（日本語）を引く。未知のエラーは None。"""
@@ -43,6 +88,11 @@ def hint_for_exception(exc: BaseException | None) -> str | None:
     state = getattr(exc, "state", None)
     if type(exc).__name__ == "B2LoginError" and isinstance(state, str):
         hint = _B2_STATE_HINTS.get(state)
+        if hint:
+            return hint
+
+    if isinstance(state, str):
+        hint = _PORTAL_FETCH_STATE_HINTS.get(state)
         if hint:
             return hint
 
