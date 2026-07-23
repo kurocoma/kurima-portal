@@ -96,7 +96,7 @@
     <section class="review mt-14" style="background:var(--surface);border-color:var(--line);">
       <div class="review-head" style="border-bottom-color:var(--line-soft);">
         <h2 class="review-title" style="color:var(--text);">納品書印刷待ちへの復旧結果</h2>
-        <span class="review-hint">{% if restore_result.executed %}実行しました{% else %}確認のみ{% endif %}{% if restore_result.failed_order_numbers %} ・ 失敗 {{ restore_result.failed_order_numbers|join(', ') }}{% endif %}</span>
+        <span class="review-hint">実行しました{% if restore_result.failed_order_numbers %} ・ 失敗 {{ restore_result.failed_order_numbers|join(', ') }}{% endif %}</span>
       </div>
       <div class="review-scroll">
         <table class="tbl tbl-min-560">

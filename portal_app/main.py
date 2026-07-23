@@ -2444,14 +2444,13 @@ async def yamato_restore_print_wait(request: Request):
     profile = profile_for_mode(form.get("mode"))
     order_numbers = _parse_order_numbers(form.get("order_nos"))
     headed = _form_headed(form)
-    execute = _form_bool(form, "execute") or form.get("restore_mode") == "execute"
     slow_mo_ms = _form_int(form, "slow_mo_ms", 150)
 
     try:
         restore_result = await run_in_threadpool(
             restore_next_engine_print_wait_batch_sync,
             order_numbers,
-            execute=execute,
+            execute=True,
             headless=not headed,
             slow_mo_ms=slow_mo_ms,
         )
@@ -2460,7 +2459,7 @@ async def yamato_restore_print_wait(request: Request):
             request,
             result=current_result,
             restore_result=restore_result,
-            message="納品書印刷待ちへの復旧を実行しました。" if execute else "復旧対象を確認しました。",
+            message="納品書印刷待ちへの復旧を実行しました。",
             profile=profile,
         )
     except Exception as exc:
