@@ -138,11 +138,27 @@ scripts\register_autostart.bat /delete    … すべて解除
 （現行PCは無設定で動作します。OS 標準の環境変数 `COMPUTERNAME` / `USERPROFILE` /
 `LOCALAPPDATA` / `OneDrive` / `OneDriveCommercial` も参照しますが、設定は不要です）。
 
+### 共有設定（SharePoint の kurimaportal-app）
+
+認証情報など全PC共通の値は、SharePoint 同期フォルダ
+「くりまポータル - ドキュメント/`kurimaportal-app`/`.env`」に置くと全PCで共用されます
+（`kurima-portal.env` という名前でも可）。読み込みの優先順位は次のとおりです:
+
+1. OS の環境変数（既に設定済みの値が常に勝つ）
+2. `.env.local`（端末固有の上書き。gitignore 対象）
+3. **共有 `.env`（kurimaportal-app/。会社共通の値をここに集約）**
+4. ローカル `.env` / `.env.yamato-b2`（従来どおり。共有に無いキーの補完）
+
+共有フォルダの場所は自動探索されます（`KURIMA_SHARED_ENV_DIR` で明示上書き可能）。
+注意: 共有 `.env` は SharePoint ライブラリを開ける全員が読めます。パスワード・
+セキュリティコードを置く運用は、ライブラリの閲覧権限とセットで管理してください。
+
 ### パス・基本設定
 
 | キー | 用途 |
 |---|---|
 | `KURIMA_PORTAL_ROOT` | ポータル同期フォルダ。未設定なら既定候補を自動探索（`PORTAL_ROOT` も後方互換で有効） |
+| `KURIMA_SHARED_ENV_DIR` | 共有設定フォルダの上書き（既定: ポータル同期フォルダ/`kurimaportal-app` を自動探索） |
 | `KURIMA_MASTER_BOOK` / `KURIMA_ORDER_CSV_DIR` / `KURIMA_TOOL_DIR` | 商品管理シート / 受注明細フォルダ / ツールフォルダの個別上書き（通常は不要） |
 | `KURIMA_PORT` | serve.ps1 / restart.bat の既定ポート（既定 8006） |
 | `KURIMA_ALLOWED_CLIENTS` | LAN公開時に利用を許可する接続元（カンマ区切りの IP / CIDR / 前方一致プレフィックス。例 `192.168.1.10, 192.168.20.0/24, 10.0.`）。**未設定なら無制限（従来どおり）**。ホストPC自身（127.0.0.1）は常に許可。許可外は 403 |

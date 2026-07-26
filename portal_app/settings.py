@@ -102,6 +102,11 @@ SETTINGS_CATALOG: tuple[tuple[str, tuple[tuple[str, str, bool], ...]], ...] = (
         (
             ("KURIMA_PORTAL_ROOT", "ポータル同期フォルダ（未設定なら既定候補を自動探索）", False),
             ("PORTAL_ROOT", "KURIMA_PORTAL_ROOT の後方互換キー", False),
+            (
+                "KURIMA_SHARED_ENV_DIR",
+                "共有設定フォルダの上書き（既定: ポータル同期フォルダ/kurimaportal-app を自動探索）",
+                False,
+            ),
             ("KURIMA_MASTER_BOOK", "商品管理シートの個別上書き", False),
             ("KURIMA_ORDER_CSV_DIR", "受注明細フォルダの個別上書き", False),
             ("KURIMA_TOOL_DIR", "ツールフォルダの個別上書き", False),
