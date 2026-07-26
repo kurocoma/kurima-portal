@@ -63,6 +63,8 @@ exports/
 *.jpeg
 *.webp
 *.gif
+# App assets are safe to publish
+!portal_app/static/logo.png
 
 # Evaluation and local agent artifacts
 validation/runs/
