@@ -146,7 +146,9 @@
     if (/^\d+$/.test(digits)) {
       if (digits.length === TRACKING_LENGTH) return { kind: "tracking", value: digits };
       if (hasA) return { kind: "unknown", value: text, reason: "A始まりの送り状番号は12桁のはずです" };
-      if (digits.length <= 8) return { kind: "denpyo", value: normalizeBarcode(digits) };
+      // Dが落ちたゼロ埋めバーコード値（例: 0000069677）も伝票番号として受ける
+      var stripped = digits.replace(/^0+(?=\d)/, "");
+      if (stripped.length <= 8) return { kind: "denpyo", value: normalizeBarcode(stripped) };
       return { kind: "unknown", value: text, reason: "桁数が伝票番号にも送り状番号にも一致しません" };
     }
     return { kind: "unknown", value: text, reason: "数字を読み取れません" };

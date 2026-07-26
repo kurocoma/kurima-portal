@@ -157,7 +157,7 @@ SETTINGS_CATALOG: tuple[tuple[str, tuple[tuple[str, str, bool], ...]], ...] = (
         (
             ("CLICKPOST_YAHOO_LOGIN_ID", "クリックポスト（Yahoo! ID）ログインID", True),
             ("CLICKPOST_YAHOO_PASSWORD", "クリックポスト（Yahoo! ID）パスワード", True),
-            ("CLICKPOST_SECURITYCODE", "Yahoo! ログインのセキュリティコード", True),
+            ("CLICKPOST_SECURITYCODE", "決済カードのセキュリティコード（未設定なら前面実行で手動入力）", True),
             ("CLICKPOST_HEADLESS", "クリックポスト操作ブラウザの非表示実行（既定 true）", False),
         ),
     ),

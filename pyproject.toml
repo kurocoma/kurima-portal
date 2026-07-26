@@ -13,6 +13,7 @@ dependencies = [
   "playwright==1.49.1",
   "reportlab==4.2.5",
   "pillow==12.2.0",
+  "pdfminer.six==20260107",
 ]
 
 [tool.ruff]

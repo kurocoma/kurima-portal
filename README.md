@@ -194,7 +194,7 @@ scripts\register_autostart.bat /delete    … すべて解除
 | キー | 用途 |
 |---|---|
 | `CLICKPOST_YAHOO_LOGIN_ID` / `CLICKPOST_YAHOO_PASSWORD` | クリックポスト（Yahoo! ID）ログイン |
-| `CLICKPOST_SECURITYCODE` | Yahoo! ログインのセキュリティコード（要求される環境のみ） |
+| `CLICKPOST_SECURITYCODE` | 決済カードのセキュリティコード。未設定でも前面実行(front)なら支払い画面で手動入力できる（裏実行は開始前に停止） |
 | `CLICKPOST_HEADLESS` | クリックポスト操作ブラウザの非表示実行（既定 true） |
 
 ### 出荷確定（取込対象の遡り日数）

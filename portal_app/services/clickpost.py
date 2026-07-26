@@ -28,6 +28,7 @@ from portal_app.services.next_engine_downloader import (
     _headless_default,
     _next_engine_storage_lock,
 )
+from portal_app.services.ne_invoice_pdf import extract_invoice_denpyo_order
 from portal_app.services.next_engine_order_status import (
     OrderStatusBatchRestoreResult,
     restore_next_engine_print_wait_batch_sync,
@@ -42,6 +43,10 @@ CLICKPOST_URL = "https://clickpost.jp/"
 CLICKPOST_MYPAGE_URL = "https://clickpost.jp/mypage/index"
 CLICKPOST_MULTIPLE_PRINT_URL = "https://clickpost.jp/labels/multiple_print"
 YAHOO_LOGOUT_URL = "https://login.yahoo.co.jp/config/login?.done=https%3A%2F%2Fwww.yahoo.co.jp&.src=help&logout=1"
+_YAHOO_LOGIN_ID_SELECTOR = (
+    "#login_handle, input[name='handle'], input[autocomplete*='username'], input[placeholder*='ID']"
+)
+_YAHOO_LOGIN_PASSWORD_SELECTOR = "#password, input[name='passwd'], input[type='password']"
 INVOICE_ACTION_ID = "#extension_execute_mainfunction_4"
 INVOICE_DOWNLOAD_BUTTON_ID = "#btn_nouhinsho_dl_exec"
 CLICKPOST_STORAGE_STATE_PATH = APP_ROOT / "data" / "storage" / "clickpost.json"
@@ -357,12 +362,14 @@ def preview_letterpack_addresses(
     buyer_csv: Path | None = None,
     product_csv: Path | None = None,
     preview_limit: int = 20,
+    invoice_pdf: Path | None = None,
 ) -> LetterPackAddressResult:
     return _build_letterpack_addresses(
         buyer_csv=buyer_csv,
         product_csv=product_csv,
         write=False,
         preview_limit=preview_limit,
+        invoice_pdf=invoice_pdf,
     )
 
 
@@ -371,12 +378,14 @@ def create_letterpack_address_csv(
     buyer_csv: Path | None = None,
     product_csv: Path | None = None,
     preview_limit: int = 20,
+    invoice_pdf: Path | None = None,
 ) -> LetterPackAddressResult:
     return _build_letterpack_addresses(
         buyer_csv=buyer_csv,
         product_csv=product_csv,
         write=True,
         preview_limit=preview_limit,
+        invoice_pdf=invoice_pdf,
     )
 
 
@@ -834,17 +843,20 @@ def prepare_clickpost_sync(
         if write_letterpack_addresses
         else "レターパック住所データを確認しています。",
     )
+    downloaded_invoice_pdf = invoice.downloaded_file if invoice and invoice.downloaded_file else None
     letterpack = (
         create_letterpack_address_csv(
             buyer_csv=downloaded_buyer_csv,
             product_csv=downloaded_product_csv,
             preview_limit=preview_limit,
+            invoice_pdf=downloaded_invoice_pdf,
         )
         if write_letterpack_addresses
         else preview_letterpack_addresses(
             buyer_csv=downloaded_buyer_csv,
             product_csv=downloaded_product_csv,
             preview_limit=preview_limit,
+            invoice_pdf=downloaded_invoice_pdf,
         )
     )
     progress("letterpack_csv", "completed", f"{letterpack.output_rows}件")
@@ -1497,7 +1509,19 @@ class ClickPostClient:
                 ),
             )
 
-        progress("precheck", "completed", f"{target_rows}件")
+        # 2026-07-24 実障害の再発防止: セキュリティコード未設定のまま裏実行すると
+        # 「インポート済み・未決済」の中途半端な状態で失敗し、同一CSVの再実行も
+        # 重複ガードで止まる。決済まで進めない条件はインポート前に検知して止める。
+        if self.headless and not self.credential.security_code:
+            raise RuntimeError(
+                "CLICKPOST_SECURITYCODE（クレジットカードのセキュリティコード）が未設定のため、"
+                "裏で実行(background)では決済まで進められません。CSVインポート前に停止しました。"
+                "/settings で設定を確認するか、前面実行(front)にすると支払い画面で手動入力できます。"
+            )
+        precheck_detail = f"{target_rows}件"
+        if not self.credential.security_code:
+            precheck_detail += " / セキュリティコード未設定のため決済は手動入力になります"
+        progress("precheck", "completed", precheck_detail)
         _append_audit(
             "import_payment_print_started",
             {
@@ -1832,10 +1856,22 @@ class ClickPostClient:
         return [{str(key): str(value or "") for key, value in row.items()} for row in rows]
 
     async def _complete_wallet_payment(self, page) -> None:
-        await self._maybe_complete_wallet_login(page)
         security_code = self.credential.security_code
         if not security_code:
-            raise RuntimeError("CLICKPOST_SECURITYCODE が未設定です。")
+            # 2026-07-24 実障害: 利用者PCで CLICKPOST_SECURITYCODE 未設定のまま決済に
+            # 入り、インポート済み・未決済の中途半端な状態でジョブ全体が失敗した。
+            # 前面実行なら人の手動決済を待ち、裏実行なら明確な案内付きで止める。
+            if self.headless:
+                raise RuntimeError(
+                    "CLICKPOST_SECURITYCODE（クレジットカードのセキュリティコード）が未設定です。"
+                    "/settings で設定するか、前面実行(front)にすると支払い画面で手動入力できます。"
+                )
+            await self._wait_manual_payment(page, reason="CLICKPOST_SECURITYCODE 未設定")
+            return
+
+        handled_manually = await self._maybe_complete_wallet_login(page)
+        if handled_manually:
+            return
 
         cvv_input = page.locator("#cvv, input[name='cvv'], input[name*='security'], input[autocomplete='cc-csc']").first
         if await _is_visible(cvv_input, timeout=15000):
@@ -1878,11 +1914,12 @@ class ClickPostClient:
             pass
         await page.wait_for_timeout(800)
 
-    async def _maybe_complete_wallet_login(self, page) -> None:
-        login_input = page.locator(
-            "#login_handle, input[name='handle'], input[autocomplete*='username'], input[placeholder*='ID']"
-        ).first
-        if await _is_visible(login_input, timeout=5000):
+    async def _maybe_complete_wallet_login(self, page) -> bool:
+        """決済前のYahoo!再ログインを自動処理する。手動決済へ切り替えたら True。"""
+        login_input = await _first_visible_locator(
+            page.locator(_YAHOO_LOGIN_ID_SELECTOR), timeout=5000
+        )
+        if login_input is not None:
             if self.credential.yahoo_login_id:
                 await login_input.fill(self.credential.yahoo_login_id)
             await _click_first_visible(
@@ -1896,11 +1933,15 @@ class ClickPostClient:
             await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
             await page.wait_for_timeout(1500)
 
-        password_input = page.locator("#password, input[name='passwd'], input[type='password']").first
-        if await _is_visible(password_input, timeout=10000):
+        password_field = await _first_visible_locator(
+            page.locator(_YAHOO_LOGIN_PASSWORD_SELECTOR), timeout=10000
+        )
+        if password_field is not None:
             if not self.credential.yahoo_password:
-                raise RuntimeError("CLICKPOST_YAHOO_PASSWORD が未設定です。")
-            password_field = password_input.first
+                if self.headless:
+                    raise RuntimeError("CLICKPOST_YAHOO_PASSWORD が未設定です。")
+                await self._wait_manual_payment(page, reason="CLICKPOST_YAHOO_PASSWORD 未設定")
+                return True
             await password_field.fill(self.credential.yahoo_password)
             try:
                 await _click_first_visible(
@@ -1919,6 +1960,34 @@ class ClickPostClient:
                 await password_field.press("Enter")
             await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
             await page.wait_for_timeout(2500)
+        return False
+
+    async def _wait_manual_payment(self, page, *, reason: str) -> None:
+        """自動入力できない決済を、前面ブラウザでの人の操作完了までポーリングで待つ。
+
+        支払手続きが確定するとウォレット（sbps）側からクリックポストのページへ
+        戻るため、URLがクリックポストへ戻ったことを完了とみなす。ログインの
+        手動フォールバック（マイページ600秒待ち）と同じ思想の決済版。
+        """
+        waited = 0
+        while str(page.url or "").startswith(CLICKPOST_URL) and waited < 30_000:
+            # 決済ページへの遷移が終わる前に呼ばれた場合の誤判定防止。
+            await page.wait_for_timeout(1000)
+            waited += 1000
+        if str(page.url or "").startswith(CLICKPOST_URL):
+            return
+
+        waited = 0
+        while waited < 600_000:
+            if str(page.url or "").startswith(CLICKPOST_URL):
+                await page.wait_for_timeout(1000)
+                return
+            await page.wait_for_timeout(1000)
+            waited += 1000
+        raise RuntimeError(
+            f"手動決済の完了を10分以内に確認できませんでした（{reason}）。"
+            "支払い画面でセキュリティコードを入力し、支払手続きを確定してください。"
+        )
 
     async def _download_multiple_print_pdf(self, page, output_dir: Path) -> tuple[Path | None, int]:
         await page.goto(CLICKPOST_MYPAGE_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
@@ -2020,45 +2089,58 @@ class ClickPostClient:
 
         login_id = self.credential.yahoo_login_id
         password = self.credential.yahoo_password
-        login_input = page.locator(
-            "#login_handle, input[name='handle'], input[autocomplete*='username'], input[placeholder*='ID']"
-        ).first
-        if await _is_visible(login_input, timeout=5000):
-            if not login_id:
-                raise RuntimeError("CLICKPOST_YAHOO_LOGIN_ID が未設定です。")
-            await login_input.fill(login_id)
-            await _click_first_visible(
-                [
-                    page.locator("button:has-text('次へ')"),
-                    page.locator('button[type="submit"]'),
-                ],
-                "Yahooログイン次へ",
-            )
-            await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
 
-        password_input = page.locator("#password, input[name='passwd'], input[type='password']")
-        if await _is_visible(password_input, timeout=10000):
-            if not password:
-                raise RuntimeError("CLICKPOST_YAHOO_PASSWORD が未設定です。")
-            password_field = password_input.first
-            await password_field.fill(password)
-            try:
-                await _click_first_visible(
-                    [
-                        page.locator("#btnSubmit"),
-                        page.locator("[name='btnSubmit']"),
-                        page.locator("[name='verifyPassword']"),
-                        page.get_by_role("button", name=re.compile("ログイン|同意|次へ|確認")),
-                        page.locator("button:has-text('ログイン')"),
-                        page.locator('button[type="submit"]:not([disabled])'),
-                        page.locator('input[type="submit"]:not([disabled])'),
-                    ],
-                    "Yahooログイン実行",
+        # Yahoo!ログイン画面はSPA描画で入力欄が遅れて現れる。一発判定は未描画時に
+        # count()==0 で即スキップになり、自動入力されないまま人待ちになるため、
+        # 描画をポーリングで待つ（access_analytics_yahoo と同じ考え方）。
+        state = await _wait_yahoo_login_prompt(page, timeout_ms=30000)
+        if state == "id":
+            if not login_id:
+                if self.headless:
+                    raise RuntimeError("CLICKPOST_YAHOO_LOGIN_ID が未設定です。")
+            else:
+                login_input = await _first_visible_locator(
+                    page.locator(_YAHOO_LOGIN_ID_SELECTOR), timeout=2000
                 )
-            except RuntimeError:
-                await password_field.press("Enter")
-            await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
-            await page.wait_for_timeout(2500)
+                if login_input is not None:
+                    await login_input.fill(login_id)
+                    await _click_first_visible(
+                        [
+                            page.locator("button:has-text('次へ')"),
+                            page.locator('button[type="submit"]'),
+                        ],
+                        "Yahooログイン次へ",
+                    )
+                    await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
+                    state = await _wait_yahoo_login_prompt(page, timeout_ms=30000)
+
+        if state == "password":
+            if not password:
+                if self.headless:
+                    raise RuntimeError("CLICKPOST_YAHOO_PASSWORD が未設定です。")
+            else:
+                password_field = await _first_visible_locator(
+                    page.locator(_YAHOO_LOGIN_PASSWORD_SELECTOR), timeout=2000
+                )
+                if password_field is not None:
+                    await password_field.fill(password)
+                    try:
+                        await _click_first_visible(
+                            [
+                                page.locator("#btnSubmit"),
+                                page.locator("[name='btnSubmit']"),
+                                page.locator("[name='verifyPassword']"),
+                                page.get_by_role("button", name=re.compile("ログイン|同意|次へ|確認")),
+                                page.locator("button:has-text('ログイン')"),
+                                page.locator('button[type="submit"]:not([disabled])'),
+                                page.locator('input[type="submit"]:not([disabled])'),
+                            ],
+                            "Yahooログイン実行",
+                        )
+                    except RuntimeError:
+                        await password_field.press("Enter")
+                    await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
+                    await page.wait_for_timeout(2500)
 
         login_timeout = 600000 if not self.headless else 15000
         if not await _page_contains(page, "マイページ", timeout=login_timeout):
@@ -2119,7 +2201,7 @@ def _convert_clickpost_csv(
             {
                 "お届け先郵便番号": _format_zip(_cell(first_line, "送り先〒") or _cell(buyer, "送り先〒")),
                 "お届け先氏名": _cell(first_line, "送り先名") or _cell(buyer, "送り先名"),
-                "お届け先敬称": "",
+                "お届け先敬称": "様",
                 "お届け先住所1行目": address_lines[0],
                 "お届け先住所2行目": address_lines[1],
                 "お届け先住所3行目": address_lines[2],
@@ -2156,6 +2238,7 @@ def _build_letterpack_addresses(
     product_csv: Path | None,
     write: bool,
     preview_limit: int,
+    invoice_pdf: Path | None = None,
 ) -> LetterPackAddressResult:
     paths = find_clickpost_paths()
     warnings: list[str] = []
@@ -2169,9 +2252,16 @@ def _build_letterpack_addresses(
     product_rows = _read_csv(product_csv)
     products_by_order = _group_rows(product_rows, "受注番号")
 
+    if buyer_rows and "送り先電話番号" not in buyer_rows[0]:
+        warnings.append(
+            "購入者データに「送り先電話番号」列がないため、宛名の電話番号は空欄になります。"
+            "NE側の受注一覧CSV書式に「送り先電話番号」を追加してください。"
+        )
+
     candidates = [row for row in buyer_rows if _cell(row, "発送方法") == LETTERPACK_SHIPPING_METHOD]
     candidates.sort(key=lambda row: _parse_int(_cell(row, "伝票番号")) or 0)
     candidates.sort(key=lambda row: _cell(row, "店舗"), reverse=True)
+    _sort_candidates_by_invoice_order(candidates, invoice_pdf, paths, warnings)
 
     rows: list[dict[str, str]] = []
     seen_names: set[str] = set()
@@ -2231,6 +2321,64 @@ def _build_letterpack_addresses(
     if write:
         _append_audit("letterpack_addresses", result)
     return result
+
+
+def _sort_candidates_by_invoice_order(
+    candidates: list[dict[str, str]],
+    invoice_pdf: Path | None,
+    paths: ClickPostPaths,
+    warnings: list[str],
+) -> None:
+    """レターパック対象行を納品書PDFの実ページ順に並べ替える（2026-07-26 依頼）。
+
+    NEの納品書PDFページ順は伝票番号順ではないため、シール（宛名PDF）と納品書を
+    同じ順で突き合わせられるよう、PDFから読み取った順を正とする。PDFが無い・
+    解析できない・載っていない伝票は、従来並び（店舗降順→伝票番号昇順）のまま
+    末尾に回し、その旨を警告に残す。並び替えは安定ソートなのでフォールバック順は保持される。
+    """
+    if not candidates:
+        return
+    if invoice_pdf is None:
+        invoice_pdf = _latest_clickpost_invoice_pdf(paths)
+    if invoice_pdf is None or not invoice_pdf.exists():
+        warnings.append("納品書PDFが見つからないため、宛名は従来の並び順で出力しました。")
+        return
+
+    known_numbers = [_cell(row, "伝票番号") for row in candidates]
+    try:
+        ordered = extract_invoice_denpyo_order(invoice_pdf, known_numbers)
+    except Exception as exc:
+        warnings.append(f"納品書PDFの並び順を読み取れなかったため従来の並び順で出力しました: {exc}")
+        return
+    if not ordered:
+        warnings.append(
+            f"納品書PDFに宛名対象の伝票番号が見つからないため従来の並び順で出力しました: {invoice_pdf.name}"
+        )
+        return
+
+    rank = {number: index for index, number in enumerate(ordered)}
+    unmatched = [number for number in known_numbers if number not in rank]
+    if unmatched:
+        warnings.append(
+            "納品書PDFに載っていない伝票番号があるため末尾に回しました: " + ", ".join(unmatched)
+        )
+    candidates.sort(key=lambda row: rank.get(_cell(row, "伝票番号"), len(rank)))
+
+
+def _latest_clickpost_invoice_pdf(paths: ClickPostPaths) -> Path | None:
+    """直近の納品書PDF（納品書_clickpost_*.pdf）をファイル名のタイムスタンプで選ぶ。
+
+    OneDrive配下のためファイルの中身は開かず、名前の列挙だけで決める。
+    """
+    directory = paths.portal_paths.portal_root / "ネクストエンジン" / "ne_納品書pdf"
+    if not directory.is_dir():
+        return None
+    names = sorted(
+        (path for path in directory.glob("納品書_clickpost_*.pdf")),
+        key=lambda path: path.name,
+        reverse=True,
+    )
+    return names[0] if names else None
 
 
 def _build_clickpost_tracking_reflection(
@@ -3450,6 +3598,30 @@ def _load_clickpost_credential() -> ClickPostCredential:
 def _clickpost_headless_default() -> bool:
     raw = os.environ.get("CLICKPOST_HEADLESS", "true").strip().lower()
     return raw not in {"0", "false", "no", "off"}
+
+
+async def _wait_yahoo_login_prompt(page, *, timeout_ms: int, poll_ms: int = 500) -> str:
+    """Yahoo!ログインSPAの描画をポーリングで待ち、現在の画面種別を返す。
+
+    返り値: "mypage"（既ログインでクリックポストへ戻った）/ "id" / "password" /
+    ""（タイムアウト。CAPTCHA・確認コード等の未知画面はここに落ち、呼び出し元の
+    マイページ待ち＝前面実行の手動フォールバックに委ねる）。
+    """
+    waited = 0
+    while True:
+        if await _page_contains(page, "マイページ", timeout=250):
+            return "mypage"
+        if await _first_visible_locator(page.locator(_YAHOO_LOGIN_ID_SELECTOR), timeout=250) is not None:
+            return "id"
+        if (
+            await _first_visible_locator(page.locator(_YAHOO_LOGIN_PASSWORD_SELECTOR), timeout=250)
+            is not None
+        ):
+            return "password"
+        if waited >= timeout_ms:
+            return ""
+        await page.wait_for_timeout(poll_ms)
+        waited += poll_ms
 
 
 async def _page_contains(page, text: str, *, timeout: int) -> bool:

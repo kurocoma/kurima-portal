@@ -41,7 +41,8 @@ def classify_scan_value(raw: object) -> ScanClassification:
     - D始まり（納品書バーコード）→ 伝票番号。normalize_barcode_value でD・ゼロ埋め除去
     - A始まり+12桁数字（レターパックのバーコード）→ 送り状番号（A除去）
     - 12桁数字 → 送り状番号
-    - 8桁以下の数字 → 伝票番号（手入力を許容）
+    - 先頭ゼロを除いて8桁以下の数字 → 伝票番号（手入力と、Dが落ちた
+      ゼロ埋めバーコード値（例: 0000069677）を許容。2026-07-24 実障害対応）
     - それ以外 → unknown
     """
     text = str(raw or "").strip()
@@ -63,8 +64,9 @@ def classify_scan_value(raw: object) -> ScanClassification:
             return ScanClassification(
                 "unknown", text, f"A始まりの送り状番号は{TRACKING_LENGTH}桁のはずです"
             )
-        if len(body) <= DENPYO_MAX_LENGTH:
-            return ScanClassification("denpyo", normalize_barcode_value(body))
+        stripped = body.lstrip("0") or "0"
+        if len(stripped) <= DENPYO_MAX_LENGTH:
+            return ScanClassification("denpyo", normalize_barcode_value(stripped))
         return ScanClassification("unknown", text, "桁数が伝票番号にも送り状番号にも一致しません")
 
     return ScanClassification("unknown", text, "数字を読み取れません")
