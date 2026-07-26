@@ -1069,6 +1069,27 @@ async def progress_cancel(job_id: str):
     return {"cancelling": True, "stopped_at": where}
 
 
+@app.get("/clickpost/download/letterpack-pdf-latest")
+def clickpost_download_letterpack_pdf_latest(disposition: str = "attachment"):
+    # 在庫明細確認と同様に、最新のレターパック宛名PDFをその場でダウンロードする。
+    paths = find_clickpost_paths()
+    pdf_dir = paths.completed_data_dir / "letterpack_label_pdfs"
+    candidates = sorted(pdf_dir.glob("letterpack_labels_*.pdf")) if pdf_dir.is_dir() else []
+    if not candidates:
+        return PlainTextResponse(
+            "レターパックPDFがまだ作成されていません。「レターパックPDFを作成」を先に実行してください。",
+            status_code=404,
+        )
+    latest = candidates[-1]
+    content_disposition_type = "inline" if disposition == "inline" else "attachment"
+    return FileResponse(
+        latest,
+        media_type="application/pdf",
+        filename=latest.name,
+        content_disposition_type=content_disposition_type,
+    )
+
+
 @app.get("/clickpost/download/letterpack-pdf/{filename}")
 def clickpost_download_letterpack_pdf(filename: str, disposition: str = "attachment"):
     safe_name = Path(filename).name
@@ -1802,6 +1823,7 @@ async def clickpost_full_run_start(request: Request):
     if not headed:
         slow_mo_ms = 0
     max_payments = max(1, min(_form_int(form, "max_payments", 20), 100))
+    restore_ne_status = _form_bool(form, "restore_ne_status")
 
     def worker(job_id: str) -> None:
         def update_progress(step: str, status: str, detail: str | None = None) -> None:
@@ -1819,7 +1841,7 @@ async def clickpost_full_run_start(request: Request):
             slow_mo_ms=slow_mo_ms,
             preview_limit=30,
             download_invoices=True,
-            restore_invoices_after_download=False,
+            restore_invoices_after_download=restore_ne_status,
             progress_callback=update_progress,
         )
 
@@ -1850,6 +1872,8 @@ async def clickpost_full_run_start(request: Request):
             headless=not headed,
             slow_mo_ms=slow_mo_ms,
             max_payments=max_payments,
+            # 動作確認モードでは同一受注の再実行になるため、同一CSV内容の重複ガードを通す
+            allow_duplicate_csv=restore_ne_status,
             progress_callback=update_progress,
         )
         message = (
@@ -1857,6 +1881,13 @@ async def clickpost_full_run_start(request: Request):
             if import_result.executed and not import_result.skipped_reason
             else "3処理まとめ実行を終了しました。結果を確認してください。"
         )
+        if restore_ne_status:
+            restored = bool(getattr(prepare_result.invoice, "restored", False)) if prepare_result.invoice else False
+            message += (
+                " 対象伝票は「納品書印刷待ち」へ復旧済みです。"
+                if restored
+                else " ※NE復旧オプションが指定されましたが復旧は実行されませんでした（対象なし、または納品書取得スキップ）。"
+            )
         progress_jobs.finish(
             job_id,
             message=message,
@@ -1891,6 +1922,7 @@ async def clickpost_full_run_start(request: Request):
             "slow_mo_ms": slow_mo_ms,
             "max_payments": max_payments,
             "execute": True,
+            "restore_ne_status": restore_ne_status,
         },
     )
     return {"job_id": job_id}

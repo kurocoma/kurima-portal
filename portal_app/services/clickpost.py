@@ -6,12 +6,14 @@ import hashlib
 import json
 import os
 import re
+import time
 import unicodedata
 import warnings as warning_module
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Iterable
+from urllib.parse import urljoin
 
 import openpyxl
 
@@ -235,6 +237,8 @@ class ClickPostInvoiceDownloadResult:
     error: str | None
     dialog_messages: tuple[str, ...]
     audit_path: Path | None
+    # 速度検証用: download / restore / restore_verify の各フェーズ所要秒（audit ログに残る）
+    phase_seconds: dict[str, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -533,7 +537,18 @@ def download_clickpost_invoice_batch_sync(
     restore_after_download: bool = False,
     headless: bool | None = None,
     slow_mo_ms: int = 0,
+    progress_detail: Callable[[str], None] | None = None,
 ) -> ClickPostInvoiceDownloadResult:
+    def notify(detail: str) -> None:
+        if progress_detail is None:
+            return
+        try:
+            progress_detail(detail)
+        except Exception:
+            pass
+
+    phase_started = time.monotonic()
+    phase_seconds: dict[str, float] = {}
     with _next_engine_storage_lock():
         result = asyncio.run(
             download_clickpost_invoice_batch(
@@ -543,6 +558,7 @@ def download_clickpost_invoice_batch_sync(
                 slow_mo_ms=slow_mo_ms,
             )
         )
+    phase_seconds["download"] = round(time.monotonic() - phase_started, 1)
 
     restore_result: OrderStatusBatchRestoreResult | None = None
     restore_verify_result: OrderStatusBatchRestoreResult | None = None
@@ -552,18 +568,28 @@ def download_clickpost_invoice_batch_sync(
         and result.downloaded_file is not None
         and result.before_list.order_numbers
     ):
+        notify("NEの対象伝票を「納品書印刷待ち」へ復旧しています。")
+        phase_started = time.monotonic()
         restore_result = restore_next_engine_print_wait_batch_sync(
             result.before_list.order_numbers,
             execute=True,
             headless=headless,
             slow_mo_ms=slow_mo_ms,
         )
-        restore_verify_result = restore_next_engine_print_wait_batch_sync(
-            result.before_list.order_numbers,
-            execute=False,
-            headless=headless,
-            slow_mo_ms=slow_mo_ms,
-        )
+        phase_seconds["restore"] = round(time.monotonic() - phase_started, 1)
+
+        # 復旧が全件成功していれば、別セッションを立てての検証パスは省略する
+        # （検証はNEログインからやり直すため約1分かかる。失敗があったときだけ実施）。
+        if restore_result.failed_order_numbers:
+            notify("復旧結果を検証しています。")
+            phase_started = time.monotonic()
+            restore_verify_result = restore_next_engine_print_wait_batch_sync(
+                result.before_list.order_numbers,
+                execute=False,
+                headless=headless,
+                slow_mo_ms=slow_mo_ms,
+            )
+            phase_seconds["restore_verify"] = round(time.monotonic() - phase_started, 1)
         result = replace(
             result,
             restored=True,
@@ -571,6 +597,7 @@ def download_clickpost_invoice_batch_sync(
             restore_verify_result=restore_verify_result,
         )
 
+    result = replace(result, phase_seconds=phase_seconds)
     _append_audit("invoice_download", result)
     if result.error:
         raise RuntimeError(result.error)
@@ -659,6 +686,7 @@ async def import_pay_print_clickpost_csv(
     headless: bool | None = None,
     slow_mo_ms: int = 0,
     max_payments: int = 20,
+    allow_duplicate_csv: bool = False,
     progress_callback: Callable[[str, str, str | None], None] | None = None,
 ) -> ClickPostImportPaymentPrintResult:
     paths = find_clickpost_paths()
@@ -670,6 +698,7 @@ async def import_pay_print_clickpost_csv(
         execute=execute,
         output_dir=resolved_output_dir,
         max_payments=max_payments,
+        allow_duplicate_csv=allow_duplicate_csv,
         progress_callback=progress_callback,
     )
 
@@ -682,6 +711,7 @@ def import_pay_print_clickpost_csv_sync(
     headless: bool | None = None,
     slow_mo_ms: int = 0,
     max_payments: int = 20,
+    allow_duplicate_csv: bool = False,
     progress_callback: Callable[[str, str, str | None], None] | None = None,
 ) -> ClickPostImportPaymentPrintResult:
     return asyncio.run(
@@ -692,6 +722,7 @@ def import_pay_print_clickpost_csv_sync(
             headless=headless,
             slow_mo_ms=slow_mo_ms,
             max_payments=max_payments,
+            allow_duplicate_csv=allow_duplicate_csv,
             progress_callback=progress_callback,
         )
     )
@@ -811,6 +842,8 @@ def prepare_clickpost_sync(
                 restore_after_download=restore_invoices_after_download,
                 headless=not headed,
                 slow_mo_ms=slow_mo_ms,
+                # フェーズ境界を events.jsonl に残す（download→restore の内訳検証用）
+                progress_detail=lambda detail: progress("invoice_download", "running", detail),
             )
             invoice_detail = (
                 f"{invoice.before_list.count}件"
@@ -1469,6 +1502,7 @@ class ClickPostClient:
         execute: bool,
         output_dir: Path,
         max_payments: int,
+        allow_duplicate_csv: bool = False,
         progress_callback: Callable[[str, str, str | None], None] | None = None,
     ) -> ClickPostImportPaymentPrintResult:
         rows = _read_csv(csv_file)
@@ -1519,7 +1553,7 @@ class ClickPostClient:
                 warning_text=None,
             )
 
-        previous_import = _find_clickpost_import_attempt(csv_sha256)
+        previous_import = None if allow_duplicate_csv else _find_clickpost_import_attempt(csv_sha256)
         if previous_import is not None:
             progress("precheck", "completed", "同じCSV内容の実行履歴があるため停止しました。")
             return ClickPostImportPaymentPrintResult(
@@ -1600,7 +1634,12 @@ class ClickPostClient:
                         progress("csv_import", "completed", f"{visible_payment_buttons}件")
                         progress("payment", "running", "支払い手続きを実行しています。")
                         payment_attempts, payments_completed, remaining_payment_buttons = (
-                            await self._complete_available_wallet_payments(page, max_payments)
+                            await self._complete_available_wallet_payments(
+                                page,
+                                max_payments,
+                                # 1件ごとに進捗を更新する（events.jsonl に時刻が残り、件別の所要時間を検証できる）
+                                on_payment=lambda detail: progress("payment", "running", detail),
+                            )
                         )
                         payment_detail = f"{payments_completed}/{payment_attempts}件完了"
                         if remaining_payment_buttons:
@@ -1767,7 +1806,20 @@ class ClickPostClient:
         await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
         await page.wait_for_timeout(1500)
 
-    async def _complete_available_wallet_payments(self, page, max_payments: int) -> tuple[int, int, int]:
+    async def _complete_available_wallet_payments(
+        self,
+        page,
+        max_payments: int,
+        on_payment: Callable[[str], None] | None = None,
+    ) -> tuple[int, int, int]:
+        def notify(detail: str) -> None:
+            if on_payment is None:
+                return
+            try:
+                on_payment(detail)
+            except Exception:
+                pass
+
         payment_attempts = 0
         payments_completed = 0
         while payment_attempts < max_payments:
@@ -1791,16 +1843,18 @@ class ClickPostClient:
                     break
                 await next_payment.click()
                 await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
-                await page.wait_for_timeout(1500)
+                await page.wait_for_timeout(500)
                 continue
 
             payment_attempts += 1
+            notify(f"{payment_attempts}件目を決済しています（{payments_completed}件完了）。")
             await payment_button.click()
             await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
-            await page.wait_for_timeout(1500)
+            await page.wait_for_timeout(500)
             await self._complete_wallet_payment(page)
             payments_completed += 1
-            await page.wait_for_timeout(1500)
+            notify(f"{payments_completed}件完了（{payment_attempts}件試行）。")
+            await page.wait_for_timeout(500)
 
         remaining_payment_buttons = await _count_visible(
             page.locator('input.ywallet_button, input[name^="wallet_button["]')
@@ -1816,7 +1870,11 @@ class ClickPostClient:
         update_workbook: bool,
         imported_after: datetime | None = None,
     ) -> tuple[Path, int, Path | None, bool, list[str]]:
-        mypage_rows = await self._scrape_clickpost_tracking_rows(page)
+        # マイページ一覧は1ページ10件。今回取込分＋動作確認の重複分を確実に含むよう
+        # 余裕を持った件数まで読む（不足すると後半の申込が照合できず取得漏れになる）。
+        mypage_rows = await self._scrape_clickpost_tracking_rows(
+            page, min_rows=max(30, len(import_rows) * 3)
+        )
         tracking_rows, warnings = _match_imported_clickpost_tracking(
             import_rows,
             mypage_rows,
@@ -1845,9 +1903,40 @@ class ClickPostClient:
 
         return output_csv, complete_tracking_count, workbook_path, workbook_updated, warnings
 
-    async def _scrape_clickpost_tracking_rows(self, page) -> list[dict[str, str]]:
+    async def _scrape_clickpost_tracking_rows(
+        self, page, *, min_rows: int = 100, max_pages: int = 12
+    ) -> list[dict[str, str]]:
+        """マイページの申込一覧を新しい順に読み出す（ページング対応・1ページ10件）。
+
+        min_rows 件集まるか Next リンクが無くなるまでページを辿る。一覧のデフォルト
+        ソートは申込日時降順なので、直近の取込分は先頭ページ側に固まっている。
+        """
         await page.goto(CLICKPOST_MYPAGE_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
-        await page.wait_for_timeout(1500)
+        all_rows: list[dict[str, str]] = []
+        for _ in range(max_pages):
+            all_rows.extend(await self._scrape_clickpost_tracking_page(page))
+            if len(all_rows) >= min_rows:
+                break
+            next_href = await page.evaluate(
+                """
+                () => {
+                  const link = Array.from(document.querySelectorAll("a")).find(
+                    (a) => /^(Next|次へ?)$/i.test((a.textContent || "").trim())
+                  );
+                  return link ? link.getAttribute("href") : null;
+                }
+                """
+            )
+            if not next_href:
+                break
+            await page.goto(
+                urljoin(CLICKPOST_URL, str(next_href)),
+                wait_until="domcontentloaded",
+                timeout=nav_timeout_ms(),
+            )
+        return all_rows
+
+    async def _scrape_clickpost_tracking_page(self, page) -> list[dict[str, str]]:
         await page.wait_for_selector("table", timeout=30000)
         rows = await page.evaluate(
             """
@@ -1949,10 +2038,17 @@ class ClickPostClient:
             await page.wait_for_load_state("domcontentloaded", timeout=10000)
         except PlaywrightTimeoutError:
             pass
-        await page.wait_for_timeout(800)
+        await page.wait_for_timeout(500)
 
     async def _maybe_complete_wallet_login(self, page) -> bool:
-        """決済前のYahoo!再ログインを自動処理する。手動決済へ切り替えたら True。"""
+        """決済前のYahoo!再ログインを自動処理する。手動決済へ切り替えたら True。
+
+        Yahoo!認証は必ず login.yahoo.co.jp ドメインへのリダイレクトで行われるため、
+        URLがそれ以外（通常の決済ページ）のときはログイン欄探索を丸ごとスキップする
+        （毎決済でのタイムアウト待ちをなくす）。
+        """
+        if "login.yahoo.co.jp" not in str(page.url or ""):
+            return False
         login_input = await _first_visible_locator(
             page.locator(_YAHOO_LOGIN_ID_SELECTOR), timeout=5000
         )
@@ -2847,14 +2943,26 @@ def _find_tracking_match(
     target_content: str,
     require_content: bool,
 ) -> int | None:
+    candidates: list[int] = []
     for index in sorted(unused_indexes):
         row = rows[index]
         if _normalize_tracking_name(_cell(row, "お届け先氏名")) != target_name:
             continue
         if require_content and _normalize_tracking_content(_cell(row, "内容品")) != target_content:
             continue
-        return index
-    return None
+        candidates.append(index)
+    if not candidates:
+        return None
+
+    # 同一宛先の申込が複数あるとき（動作確認の再実行など）は最新の申込日時を正とする。
+    # 申込日時が同じ・またはパース不能な場合はマイページの表示順（若いindex）を保つ。
+    def _recency_key(index: int) -> tuple[int, datetime, int]:
+        parsed = _parse_clickpost_application_datetime(_cell(rows[index], "申込日時"))
+        if parsed is None:
+            return (0, datetime.min, -index)
+        return (1, parsed, -index)
+
+    return max(candidates, key=_recency_key)
 
 
 def _normalize_tracking_content(value: str) -> str:
@@ -3687,12 +3795,11 @@ async def _wait_yahoo_login_prompt(page, *, timeout_ms: int, poll_ms: int = 500)
     while True:
         if await _page_contains(page, "マイページ", timeout=250):
             return "mypage"
-        if await _first_visible_locator(page.locator(_YAHOO_LOGIN_ID_SELECTOR), timeout=250) is not None:
+        # このループ自体がポーリングなので、要素判定は即時版で行う
+        # （出現待ち版を使うとセレクタごとに実時間待ちが積み上がる）。
+        if await _first_visible_locator_now(page.locator(_YAHOO_LOGIN_ID_SELECTOR)) is not None:
             return "id"
-        if (
-            await _first_visible_locator(page.locator(_YAHOO_LOGIN_PASSWORD_SELECTOR), timeout=250)
-            is not None
-        ):
+        if await _first_visible_locator_now(page.locator(_YAHOO_LOGIN_PASSWORD_SELECTOR)) is not None:
             return "password"
         if waited >= timeout_ms:
             return ""
@@ -3718,16 +3825,22 @@ async def _page_text_excerpt(page) -> str:
     return text[:500]
 
 
-async def _click_first_visible(locators, label: str) -> None:
-    for locator in locators:
-        try:
-            visible_locator = await _first_visible_locator(locator, timeout=2500)
-            if visible_locator is not None:
-                await visible_locator.click()
-                return
-        except Exception:
-            continue
-    raise RuntimeError(f"{label} をクリックできませんでした。")
+async def _click_first_visible(locators, label: str, *, timeout: int = 4000, poll_ms: int = 150) -> None:
+    # 全候補を即時判定で一巡し、どれも無ければ少し待って再巡回する。
+    # 候補を1つずつ timeout 待ちすると「そのページに無い候補」で待ち時間を浪費するため。
+    deadline = time.monotonic() + timeout / 1000
+    while True:
+        for locator in locators:
+            try:
+                visible_locator = await _first_visible_locator_now(locator)
+                if visible_locator is not None:
+                    await visible_locator.click()
+                    return
+            except Exception:
+                continue
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"{label} をクリックできませんでした。")
+        await asyncio.sleep(poll_ms / 1000)
 
 
 async def _check_first_visible(locator, label: str) -> None:
@@ -3756,20 +3869,39 @@ async def _count_visible(locator) -> int:
     return count
 
 
-async def _first_visible_locator(locator, *, timeout: int):
+async def _first_visible_locator_now(locator):
+    """今この瞬間に可視な最初の要素を返す（待たない）。不在確認用。"""
     try:
         count = await locator.count()
         if count == 0:
             return None
         if count == 1:
-            return locator if await locator.is_visible(timeout=timeout) else None
+            return locator if await locator.is_visible() else None
         for index in range(count):
             candidate = locator.nth(index)
-            if await candidate.is_visible(timeout=timeout):
+            if await candidate.is_visible():
                 return candidate
-    except PlaywrightTimeoutError:
+    except Exception:
+        # 遷移中の "Execution context was destroyed" 等。ポーリング側で再試行される。
         return None
     return None
+
+
+async def _first_visible_locator(locator, *, timeout: int, poll_ms: int = 150):
+    """可視要素が現れるまで最大 timeout ms ポーリングして返す（出現し次第すぐ返す）。
+
+    従来は「その瞬間のDOM」しか見ない即時判定で、描画待ちを呼び出し側の固定
+    wait_for_timeout に頼っていた（速くても遅くても一律に待つ＝読み込み後の余白）。
+    出現待ちをここに持たせることで、固定待ちを短縮しても取りこぼさない。
+    """
+    deadline = time.monotonic() + timeout / 1000
+    while True:
+        found = await _first_visible_locator_now(locator)
+        if found is not None:
+            return found
+        if time.monotonic() >= deadline:
+            return None
+        await asyncio.sleep(poll_ms / 1000)
 
 
 def _append_audit(kind: str, result) -> None:

@@ -60,6 +60,10 @@
           </label>
           <input type="hidden" name="slow_mo_ms" value="{{ slow_mo_ms|default(150) }}">
         </div>
+        <label class="opt mt-10" style="align-items:center;">
+          <input type="checkbox" name="restore_ne_status">
+          <span style="font-size:12.5px;color:var(--text-2);line-height:1.6;">納品書PDF取得後にNEの対象伝票を「納品書印刷待ち」へ戻す（動作確認用・NEのステータスを動かしたくないとき）</span>
+        </label>
       </div>
     </details>
   </form>
@@ -91,6 +95,7 @@
         <strong class="op-name">レターパックPDFを作成</strong>
         <span class="op-desc">作成済みの住所データから宛名PDFを作成</span>
       </div>
+      <a class="btn btn-sm" href="/clickpost/download/letterpack-pdf-latest">最新PDFをダウンロード</a>
       <form class="op-form" method="post" action="/clickpost/create-letterpack-pdf" data-progress-form data-progress-endpoint="/clickpost/create-letterpack-pdf/start">
         <button class="btn btn-sm" type="submit">実行</button>
       </form>
