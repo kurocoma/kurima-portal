@@ -68,6 +68,12 @@ CLICKPOST_SHIPPING_OPTIONS = (
     "31 : レターパック500",
     "34 : クリックポスト",
 )
+# 購入者CSVはオリジナルステータス「メール便2」バッジ検索からダウンロードする（2026-07-27）。
+# NEの一覧列設定は検索ビュー種別ごとにサーバー側保存されており、このビューだけが
+# 旧PAD時代と同じ32列（送り先電話番号・配達希望日・入金状況・作業用欄つき）を出力する。
+# 通常の検索ダイアログ絞り込みビューは28列で電話番号が出ない（レターパック宛名の
+# 電話番号欠落の原因）。バッジ名が変わった場合は従来ビューへ自動フォールバックする。
+CLICKPOST_ORIGINAL_STATUS_LABEL = "メール便2"
 LETTERPACK_ADDRESS_HEADERS = (
     "No",
     "宛名1（社名など）",
@@ -978,11 +984,42 @@ class NextEngineClickPostClient:
                 "dataクリックレター",
                 ".csv",
             )
-            source_filename = await _download_ne_csv_from_current_page(
-                page,
-                destination,
-                label="clickpost_buyer",
-            )
+
+            # 送り先電話番号つき32列を得るため「メール便2」バッジ検索からダウンロードし、
+            # 伝票番号集合がスナップショット（正規の絞り込み結果）と一致するかを検証する。
+            # 不一致・バッジ不在なら従来ビューへ戻して取り直す（対象受注の取り違え防止）。
+            source_filename = None
+            used_badge_view = await _apply_clickpost_original_status_search(page)
+            if used_badge_view:
+                source_filename = await _download_ne_csv_from_current_page(
+                    page,
+                    destination,
+                    label="clickpost_buyer",
+                )
+                if _csv_denpyo_numbers(destination) != set(snapshot.order_numbers):
+                    _append_audit(
+                        "buyer_download_badge_mismatch",
+                        {
+                            "badge_label": CLICKPOST_ORIGINAL_STATUS_LABEL,
+                            "snapshot_order_numbers": list(snapshot.order_numbers),
+                            "csv_order_numbers": sorted(_csv_denpyo_numbers(destination)),
+                        },
+                    )
+                    used_badge_view = False
+
+            if not used_badge_view:
+                await page.goto(
+                    ORDER_LIST_PRINT_WAIT_URL,
+                    wait_until="domcontentloaded",
+                    timeout=nav_timeout_ms(),
+                )
+                await page.wait_for_timeout(2500)
+                await _filter_clickpost_shipping_methods(page)
+                source_filename = await _download_ne_csv_from_current_page(
+                    page,
+                    destination,
+                    label="clickpost_buyer",
+                )
 
             result = ClickPostBuyerDownloadResult(
                 executed=True,
@@ -3177,6 +3214,45 @@ async def _filter_clickpost_shipping_methods(page) -> None:
     await _click_search(page)
     await page.wait_for_timeout(3500)
     await _wait_for_clickpost_search_results(page)
+
+
+async def _apply_clickpost_original_status_search(page) -> bool:
+    """オリジナルステータス「メール便2」バッジ検索へ切り替える。成功なら True。
+
+    このビューのCSVには送り先電話番号が含まれる（クラス直定数のコメント参照）。
+    バッジが見つからない・検索が完了しない場合は False を返し、呼び出し元が
+    従来ビューのままダウンロードする（電話番号なしで従来どおり動く）。
+    """
+    try:
+        clicked = await page.evaluate(
+            """
+            (label) => {
+              const normalize = (value) => (value || "").replace(/\\s+/g, "").trim();
+              const badges = Array.from(document.querySelectorAll('a[name="original_status"]'));
+              const badge = badges.find((anchor) => normalize(anchor.textContent) === label);
+              if (!badge) return false;
+              badge.click();
+              return true;
+            }
+            """,
+            CLICKPOST_ORIGINAL_STATUS_LABEL,
+        )
+        if not clicked:
+            return False
+        await page.wait_for_timeout(3500)
+        await _wait_for_clickpost_search_results(page)
+        return True
+    except Exception:
+        return False
+
+
+def _csv_denpyo_numbers(csv_path: Path) -> set[str]:
+    """CSVの伝票番号列を集合で返す（バッジ検索結果とスナップショットの突合用）。"""
+    return {
+        value
+        for row in _read_csv(csv_path)
+        if (value := _cell(row, "伝票番号").strip())
+    }
 
 
 async def _wait_for_clickpost_search_results(page) -> None:
