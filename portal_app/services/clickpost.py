@@ -3637,6 +3637,49 @@ async def _set_clickpost_invoice_options(page, *, mode: str) -> None:
     await _check_if_present(page, f'input[name="mode"][value="{mode}"]')
     await _check_if_present(page, 'input[name="ss"][value="-1"]')
     await _check_if_present(page, 'input[name="output"][value="PDF"]')
+    await _ensure_invoice_sort_order(page)
+
+
+async def _ensure_invoice_sort_order(page) -> None:
+    """納品書・出荷指示書ダウンロードの並び順を「店舗コード、伝票番号順」にする。
+
+    並び順プルダウン(select[name="sort"])はNE側に前回値が保存されるため、
+    空白や別の並びになっていることがある。ダウンロード実行前に毎回確認し、
+    「店舗コード、伝票番号順」以外なら選択し直す。
+    """
+    select = await _first_visible_locator(page.locator('select[name="sort"]'), timeout=10000)
+    if select is None:
+        return
+    info = await select.evaluate(
+        """
+        (element) => ({
+          value: element.value,
+          options: Array.from(element.options).map((option) => ({
+            value: option.value,
+            label: (option.textContent || "").trim(),
+          })),
+        })
+        """
+    )
+    options = info.get("options", [])
+    # 完全一致を優先する（「店舗コード、発送方法、支払方法、伝票番号順」等の
+    # 部分一致する別の並びが存在するため）。
+    target = next(
+        (option["value"] for option in options if option.get("label") == "店舗コード、伝票番号順"),
+        None,
+    )
+    if target is None:
+        target = next(
+            (
+                option["value"]
+                for option in options
+                if "店舗" in option.get("label", "") and "伝票番号" in option.get("label", "")
+            ),
+            None,
+        )
+    if target is None or str(info.get("value", "")) == str(target):
+        return
+    await select.select_option(str(target))
 
 
 async def _check_if_present(page, selector: str) -> None:
