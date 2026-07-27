@@ -116,6 +116,12 @@
 {% else %}
   {% include "_takaesu_results.html" %}
 {% endif %}
+
+{# 発注表（編集・メール貼り付け用）。操作は takaesu_order_table.js のイベント委譲。 #}
+<div class="lazy-slot" data-lazy="/inventory/takaesu/order-table">
+  <span class="lazy-spinner" aria-hidden="true"></span>発注表を読み込み中…
+</div>
+<script src="{{ url_for('static', path='/takaesu_order_table.js') }}"></script>
 {% endif %}
 
 <div id="progress-panel" class="progress-panel mt-14" hidden>

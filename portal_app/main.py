@@ -100,6 +100,12 @@ from portal_app.services.takaesu_orders import (
     download_takaesu_order_details_sync,
     prepare_takaesu_order_workflow_sync,
 )
+from portal_app.services.takaesu_order_table import (
+    TABLE_COLUMNS as TAKAESU_TABLE_COLUMNS,
+    ensure_order_table,
+    reset_order_table,
+    save_order_table_rows,
+)
 from portal_app.services import b2_chrome
 from portal_app.services.yamato_b2_import import (
     import_yamato_b2_csv,
@@ -800,6 +806,65 @@ async def inventory_takaesu_prepare_start(request: Request):
         metadata={"browser_mode": browser_mode, "slow_mo_ms": slow_mo_ms},
     )
     return {"job_id": job_id}
+
+
+def _takaesu_order_table_error_text(exc: Exception) -> str:
+    if isinstance(exc, PermissionError):
+        return (
+            "商品マスタなどの元ファイルを開けませんでした。"
+            "商品管理シート.xlsm 等をExcelで開いている場合は閉じてから、ページを再読込してください。"
+        )
+    return str(exc)
+
+
+def _takaesu_order_table_response(request: Request) -> HTMLResponse:
+    try:
+        table = ensure_order_table()
+    except Exception as exc:
+        return templates.TemplateResponse(
+            "_takaesu_order_table.html",
+            {"request": request, "order_table_error": _takaesu_order_table_error_text(exc)},
+        )
+    return templates.TemplateResponse(
+        "_takaesu_order_table.html",
+        {
+            "request": request,
+            "order_table": table,
+            "order_table_columns": TAKAESU_TABLE_COLUMNS,
+        },
+    )
+
+
+@app.get("/inventory/takaesu/order-table", response_class=HTMLResponse)
+def inventory_takaesu_order_table(request: Request):
+    # 高江洲発注表（編集・メール貼り付け用）。保存済みがあればそれを表示する。
+    return _takaesu_order_table_response(request)
+
+
+@app.post("/inventory/takaesu/order-table/save")
+async def inventory_takaesu_order_table_save(request: Request):
+    form = await _read_form(request)
+    try:
+        rows = json.loads(form.get("rows", "[]"))
+        if not isinstance(rows, list):
+            raise ValueError("rows はリストで指定してください。")
+        table = save_order_table_rows(rows)
+    except (ValueError, json.JSONDecodeError) as exc:
+        return PlainTextResponse(f"保存できませんでした: {exc}", status_code=400)
+    return {"saved_at": table.updated_at}
+
+
+@app.post("/inventory/takaesu/order-table/reset", response_class=HTMLResponse)
+async def inventory_takaesu_order_table_reset(request: Request):
+    # 編集内容を破棄して最新の高江洲発注書集計から作り直す（確認はクライアント側）。
+    try:
+        reset_order_table()
+    except Exception as exc:
+        return templates.TemplateResponse(
+            "_takaesu_order_table.html",
+            {"request": request, "order_table_error": _takaesu_order_table_error_text(exc)},
+        )
+    return _takaesu_order_table_response(request)
 
 
 @app.get("/inventory/takaesu/download")

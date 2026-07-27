@@ -1,0 +1,79 @@
+{# 高江洲発注表（編集・メール貼り付け用）の fragment。
+   GET /inventory/takaesu/order-table から遅延ロードされ、
+   「最新の発注書から作り直す」(POST …/reset) の応答でも同じ形で返す。
+   スクリプトは outerHTML 挿入では実行されないため、操作は
+   static/takaesu_order_table.js のイベント委譲が担当する（data-ot-* 属性が契約）。 #}
+{% if order_table_error %}
+  <div class="note error" id="takaesu-order-table">
+    <div class="note-title">発注表を読み込めませんでした</div>
+    <p>{{ order_table_error }}</p>
+  </div>
+{% else %}
+<section class="panel mt-14" id="takaesu-order-table" data-order-table>
+  <style>
+    #takaesu-order-table .ot-table input {
+      width: 100%; border: none; background: transparent; font: inherit;
+      color: inherit; padding: 2px 4px; box-sizing: border-box;
+    }
+    #takaesu-order-table .ot-table input:focus {
+      outline: 2px solid var(--primary, #4a90d9); background: #fff; border-radius: 4px;
+    }
+    #takaesu-order-table .ot-table td { padding: 2px 6px; }
+    #takaesu-order-table .ot-table .ot-qty input { text-align: right; }
+    #takaesu-order-table .ot-del {
+      border: none; background: transparent; color: #b04a3a; cursor: pointer;
+      font-size: 15px; line-height: 1; padding: 4px 6px;
+    }
+    #takaesu-order-table .ot-del:hover { background: #f6e3e0; border-radius: 4px; }
+    #takaesu-order-table .ot-status { font-size: 12px; color: var(--text-2, #7a7062); }
+    #takaesu-order-table .ot-status.is-error { color: #b04a3a; font-weight: 600; }
+  </style>
+
+  <h2 class="panel-title">発注表（編集・メール貼り付け用）</h2>
+  <p class="panel-lead">
+    数量の変更や行の追加・削除ができます（変更は自動保存）。
+    「表をコピー」を押すと、メール本文やExcelにそのまま貼り付けられる表がコピーされます。
+  </p>
+
+  <div class="btn-row" style="align-items:center;gap:10px;">
+    <button class="btn" type="button" data-ot-copy>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+      表をコピー
+    </button>
+    <button class="btn" type="button" data-ot-add>行を追加</button>
+    <button class="btn" type="button" data-ot-reset>最新の発注書から作り直す</button>
+    <span class="ot-status" data-ot-status>
+      {%- if order_table.updated_at %}保存済み（{{ order_table.updated_at.replace("T", " ") }}）{% else %}未保存{% endif -%}
+    </span>
+  </div>
+
+  <div class="tbl-scroll mt-14" style="overflow-x:auto;">
+    <table class="tbl tbl-min-760 ot-table" data-ot-table>
+      <thead>
+        <tr>
+          {% for column in order_table_columns %}<th>{{ column }}</th>{% endfor %}
+          <th style="width:36px;"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in order_table.rows %}
+        <tr>
+          {% for column in order_table_columns %}
+          <td{% if column in ("発注数", "受注数") %} class="ot-qty"{% endif %}>
+            <input type="text" data-ot-cell="{{ column }}" value="{{ row[column] }}">
+          </td>
+          {% endfor %}
+          <td><button class="ot-del" type="button" data-ot-del title="この行を削除">✕</button></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <p class="result-sub mt-14">
+    {% if order_table.base_source %}元データ: {{ order_table.base_source }}{% endif %}
+    {% if order_table.base_created_at %}（{{ order_table.base_created_at.replace("T", " ") }} 作成）{% endif %}
+    ／ 表の内容はこの画面での編集が正です。発注書CSV・PDFには編集は反映されません。
+  </p>
+</section>
+{% endif %}
