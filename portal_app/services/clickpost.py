@@ -29,6 +29,7 @@ from portal_app.services.next_engine_downloader import (
     _chromium_launch_options,
     _headless_default,
     _next_engine_storage_lock,
+    ensure_next_engine_page_size_max,
 )
 from portal_app.services.ne_invoice_pdf import extract_invoice_denpyo_order
 from portal_app.services.next_engine_order_status import (
@@ -3683,6 +3684,8 @@ async def _reload_next_engine_download_page(page) -> None:
 
 
 async def _snapshot_clickpost_order_list(page) -> ClickPostOrderListSnapshot:
+    # 表示件数が100のままだと一覧に出ない行が件数・選択・DLから丸ごと漏れる
+    await ensure_next_engine_page_size_max(page)
     data = await page.evaluate(
         """
         () => {

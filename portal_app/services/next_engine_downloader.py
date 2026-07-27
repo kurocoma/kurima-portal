@@ -349,6 +349,8 @@ class NextEngineOrderDetailDownloader:
         if await self._is_no_results(page):
             raise RuntimeError("Next Engine の検索結果が0件でした。CSVは保存していません。")
 
+        # 表示件数が100のままだと後半の行がダウンロードから漏れるため最大へ変更する
+        await ensure_next_engine_page_size_max(page)
         download = await self._click_download(page)
         destination = self._next_data_path()
         await download.save_as(str(destination))
@@ -585,6 +587,53 @@ class NextEngineOrderDetailDownloader:
             if not indexed.exists():
                 return indexed
         raise RuntimeError("保存ファイル名を決定できませんでした。")
+
+
+async def ensure_next_engine_page_size_max(page) -> bool:
+    """NE一覧の表示件数プルダウン(select#page_sel)を最大値（通常1000）へ変更する。
+
+    Playwright用プロファイルでは表示件数が100のまま起動することがあり、
+    一覧に出ない行がスナップショット・全選択・ダウンロードから丸ごと漏れる
+    （2026-07-27 実障害: 100件超の受注で後半がダウンロードされなかった）。
+    スナップショット取得やダウンロードの前に必ず呼ぶ。
+    プルダウンが無い画面では何もしない。戻り値は変更を行ったか。
+    """
+    select = page.locator("select#page_sel")
+    try:
+        if await select.count() == 0:
+            return False
+        values = await select.evaluate(
+            "s => Array.from(s.options).map(o => o.value)"
+        )
+        numeric_values = [str(v) for v in values if str(v).isdigit()]
+        if not numeric_values:
+            return False
+        target = max(numeric_values, key=int)
+        current = str(await select.input_value())
+    except Exception:
+        return False
+    if current == target:
+        return False
+
+    await select.select_option(target)
+    # 変更で一覧が再読込/再描画される。値の反映を確認してから少し待つ
+    # （変更が起きるのは表示件数設定が最大でない初回だけなので固定待ちで良い）。
+    try:
+        await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
+    except Exception:
+        pass
+    await page.wait_for_function(
+        """
+        (target) => {
+          const select = document.querySelector("select#page_sel");
+          return !!select && select.value === target;
+        }
+        """,
+        arg=target,
+        timeout=30000,
+    )
+    await page.wait_for_timeout(1500)
+    return True
 
 
 async def _click_first_visible(locators, label: str) -> None:

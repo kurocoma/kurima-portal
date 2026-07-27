@@ -17,6 +17,7 @@ from portal_app.services.next_engine_downloader import (
     _chromium_launch_options,
     _headless_default,
     _next_engine_storage_lock,
+    ensure_next_engine_page_size_max,
 )
 from portal_app.services.paths import PortalPaths, find_portal_paths
 from portal_app.services.yamato_flow_profile import YAMATO_PROFILE, YamatoFlowProfile
@@ -1141,6 +1142,8 @@ async def _custom_shipping_status_message(page) -> str | None:
 
 
 async def _snapshot_order_list(page) -> YamatoOrderListSnapshot:
+    # 表示件数が100のままだと一覧に出ない行が件数・選択・DLから丸ごと漏れる
+    await ensure_next_engine_page_size_max(page)
     data = await page.evaluate(
         """
         () => {
