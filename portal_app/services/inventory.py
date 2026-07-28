@@ -57,6 +57,9 @@ class InventoryResult:
     warnings: list[str]
     # 2026-07-20 依頼2: 通常商品とセット内訳をJANコードで対応付けた数量合算表
     combined_rows: list[dict[str, object]] = field(default_factory=list)
+    # 2026-07-29 要望: 内訳マスタ未一致の明細（どの商品のどのオプションが、
+    # NEオプション一覧のどのレベルで外れたかの診断付き）
+    missing_choice_rows: list[dict[str, object]] = field(default_factory=list)
 
     @property
     def normal_count(self) -> int:
@@ -85,11 +88,14 @@ def analyze_latest_inventory() -> InventoryResult:
 
 def analyze_inventory(paths: PortalPaths, source_csv: Path) -> InventoryResult:
     warnings: list[str] = []
+    missing_choice_rows: list[dict[str, object]] = []
     orders = read_order_csv(source_csv)
     masters = read_master_tables(paths.master_book)
 
     normal = build_normal_products(orders, masters)
-    choice_detail = _build_choice_products_detail(orders, masters, warnings)
+    choice_detail = _build_choice_products_detail(
+        orders, masters, warnings, missing_choice_rows=missing_choice_rows
+    )
     choice = _choice_public_view(choice_detail)
     combined = build_combined_products(normal, choice_detail, masters)
 
@@ -102,6 +108,7 @@ def analyze_inventory(paths: PortalPaths, source_csv: Path) -> InventoryResult:
         choice_rows=_records(choice),
         warnings=warnings,
         combined_rows=_records(combined),
+        missing_choice_rows=missing_choice_rows,
     )
 
 
@@ -212,6 +219,7 @@ def _build_choice_products_detail(
     orders: pd.DataFrame,
     masters: MasterTables,
     warnings: list[str],
+    missing_choice_rows: list[dict[str, object]] | None = None,
 ) -> pd.DataFrame:
     """選べるセット集計の内部版。合算表（依頼2）で使う内訳JANコード列を保持して返す。"""
     empty = pd.DataFrame(columns=["内訳JANコード", "商品名", "発注数量", "備考"])
@@ -246,9 +254,14 @@ def _build_choice_products_detail(
     expanded = expanded.rename(columns={"JANコード": "内訳JANコード", "数量": "内訳数量"})
     expanded["内訳数量"] = pd.to_numeric(expanded["内訳数量"], errors="coerce").fillna(0)
 
-    missing_choice = expanded["内訳JANコード"].fillna("").eq("").sum()
+    missing_mask = expanded["内訳JANコード"].fillna("").eq("")
+    missing_choice = missing_mask.sum()
     if missing_choice:
         warnings.append(f"選べるセットの内訳マスタ未一致が {missing_choice} 行あります。")
+        if missing_choice_rows is not None:
+            missing_choice_rows.extend(
+                _diagnose_missing_choice(expanded[missing_mask], masters.choice_master)
+            )
 
     product_lookup = masters.product_master[["JANコード", "商品名"]].drop_duplicates(
         subset=["JANコード"]
@@ -279,6 +292,55 @@ def _build_choice_products_detail(
         .sort_values("商品名")
         .reset_index(drop=True)
     )
+
+
+def _diagnose_missing_choice(
+    missing: pd.DataFrame,
+    choice_master: pd.DataFrame,
+) -> list[dict[str, object]]:
+    """内訳マスタ未一致行を（商品コード, 項目名, 選択肢）単位に集約し、
+    NEオプション一覧（紐づけマスタ）のどのレベルで外れたかを診断する。
+
+    2026-07-29 要望: 未一致の商品リストと「紐づけリストに載っているか」の
+    チェックを画面で確認できるようにする。
+    """
+    grouped = (
+        missing.groupby(["商品ｺｰﾄﾞ", "商品ｵﾌﾟｼｮﾝ.1", "商品ｵﾌﾟｼｮﾝ.2"], as_index=False)["受注数"]
+        .sum()
+        .sort_values(["商品ｺｰﾄﾞ", "商品ｵﾌﾟｼｮﾝ.1", "商品ｵﾌﾟｼｮﾝ.2"])
+    )
+    rows: list[dict[str, object]] = []
+    for _, record in grouped.iterrows():
+        code = str(record["商品ｺｰﾄﾞ"])
+        option_name = str(record["商品ｵﾌﾟｼｮﾝ.1"])
+        option_value = str(record["商品ｵﾌﾟｼｮﾝ.2"])
+        master_rows = choice_master[choice_master["NEコード"] == code]
+        if master_rows.empty:
+            diagnosis = "NEオプション一覧にこのNEコード自体が未登録"
+        else:
+            master_names = tuple(dict.fromkeys(master_rows["項目選択肢項目名"].astype(str)))
+            if option_name not in master_names:
+                diagnosis = (
+                    f"項目名「{option_name}」が未登録"
+                    f"（マスタ側の項目名: {'、'.join(master_names[:6])}）"
+                )
+            else:
+                candidates = master_rows[master_rows["項目選択肢項目名"] == option_name]
+                master_values = tuple(dict.fromkeys(candidates["項目選択肢"].astype(str)))
+                diagnosis = (
+                    f"選択肢「{option_value}」が未登録"
+                    f"（同じ項目名の登録済み選択肢: {'、'.join(master_values[:8])}）"
+                )
+        rows.append(
+            {
+                "商品コード": code,
+                "項目選択肢項目名": option_name,
+                "項目選択肢": option_value,
+                "受注数": int(record["受注数"]),
+                "診断": diagnosis,
+            }
+        )
+    return rows
 
 
 def build_combined_products(

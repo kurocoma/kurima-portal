@@ -26,6 +26,36 @@
     </div>
   {% endif %}
 
+  {% if result.missing_choice_rows %}
+    <details class="fold mt-14">
+      <summary>内訳マスタ未一致の明細（{{ result.missing_choice_rows|length }}組）<span class="fold-hint">開閉</span></summary>
+      <div class="fold-body">
+        <p class="maint-note">
+          受注のオプション組み合わせが商品管理シート.xlsm の「NEオプション一覧」に見つからなかった行です。
+          診断欄を見て、NEオプション一覧に行を追加（または表記を修正）すると解消します。
+        </p>
+        <div style="overflow-x:auto;">
+          <table class="tbl tbl-min-760">
+            <thead>
+              <tr><th>商品コード</th><th>項目名</th><th>選択肢</th><th class="num">受注数</th><th>診断（NEオプション一覧との照合）</th></tr>
+            </thead>
+            <tbody>
+              {% for row in result.missing_choice_rows %}
+              <tr>
+                <td>{{ row["商品コード"] }}</td>
+                <td>{{ row["項目選択肢項目名"] }}</td>
+                <td>{{ row["項目選択肢"] }}</td>
+                <td class="num">{{ row["受注数"] }}</td>
+                <td>{{ row["診断"] }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </details>
+  {% endif %}
+
   <div class="summary mt-14">
     <div class="summary-card">
       <div class="summary-k">CSV行数</div>

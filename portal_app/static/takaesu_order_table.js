@@ -175,6 +175,19 @@
     }
   });
 
+  // 数量セルはフォーカスで既存値を全選択し、そのまま数値を打てば上書きされるようにする
+  // （「値を消してから入力」の手間をなくす）。クリック直後の mouseup が選択を解除して
+  // しまうため、フォーカス直後の1回だけ既定動作を抑止する。
+  document.addEventListener("focusin", (event) => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement)) return;
+    if (!input.closest("[data-order-table]")) return;
+    const column = input.getAttribute("data-ot-cell");
+    if (column !== "発注数" && column !== "受注数") return;
+    input.select();
+    input.addEventListener("mouseup", (mouseEvent) => mouseEvent.preventDefault(), { once: true });
+  });
+
   document.addEventListener("click", (event) => {
     if (!(event.target instanceof HTMLElement)) return;
     const container = event.target.closest("[data-order-table]");
