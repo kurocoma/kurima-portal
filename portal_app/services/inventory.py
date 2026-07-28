@@ -241,9 +241,10 @@ def _build_choice_products_detail(
     if expanded.empty:
         return empty
 
-    expanded["商品ｺｰﾄﾞ"] = expanded["商品ｺｰﾄﾞ"].replace(
-        {"bireleysaraberuset": "a009-2215-c01"}
-    )
+    # bireleysaraberuset → a009-2215-c01 のエイリアス置換は 2026-07-29 に廃止。
+    # 受注上のコード（bireleysaraberuset）をそのまま NEオプション一覧と照合する。
+    # 置換があると画面表示が実受注と食い違い、マスタ更新先も分かりにくくなるため
+    # （未一致30行が「販売実績のない a009-2215-c01」として表示された実障害）。
     expanded["商品ｵﾌﾟｼｮﾝ.2"] = expanded["商品ｵﾌﾟｼｮﾝ.2"].replace({"ＮＯ.７": "NO.7"})
 
     choice_lookup = masters.choice_master[
