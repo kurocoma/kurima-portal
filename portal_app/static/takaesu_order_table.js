@@ -178,14 +178,82 @@
   // 数量セルはフォーカスで既存値を全選択し、そのまま数値を打てば上書きされるようにする
   // （「値を消してから入力」の手間をなくす）。クリック直後の mouseup が選択を解除して
   // しまうため、フォーカス直後の1回だけ既定動作を抑止する。
+  // 全セルで Esc 取り消し用にフォーカス時点の値も覚えておく。
   document.addEventListener("focusin", (event) => {
     const input = event.target;
     if (!(input instanceof HTMLInputElement)) return;
     if (!input.closest("[data-order-table]")) return;
+    if (!input.hasAttribute("data-ot-cell")) return;
+    input.dataset.otPrev = input.value;
     const column = input.getAttribute("data-ot-cell");
     if (column !== "発注数" && column !== "受注数") return;
     input.select();
     input.addEventListener("mouseup", (mouseEvent) => mouseEvent.preventDefault(), { once: true });
+  });
+
+  // Excel風のキーボード移動:
+  //   ↑/↓        … 上下のセルへ（移動先は全選択）
+  //   Enter       … 下のセルへ（Shift+Enter は上へ）
+  //   ←/→        … カーソルが端（または全選択状態）のときだけ隣のセルへ。
+  //                  文字の途中では通常のカーソル移動のまま。
+  //   Esc         … フォーカス時点の値に戻す
+  function moveFocus(input, rowDelta, colDelta) {
+    const tr = input.closest("tr");
+    const tbody = tr ? tr.parentElement : null;
+    if (!tr || !tbody) return false;
+    const cellsInRow = Array.from(tr.querySelectorAll("input[data-ot-cell]"));
+    const colIndex = cellsInRow.indexOf(input);
+    const rows = Array.from(tbody.querySelectorAll("tr"));
+    const rowIndex = rows.indexOf(tr);
+    const targetRow = rowIndex + rowDelta;
+    const targetCol = colIndex + colDelta;
+    if (targetRow < 0 || targetRow >= rows.length) return false;
+    const targetCells = Array.from(rows[targetRow].querySelectorAll("input[data-ot-cell]"));
+    if (targetCol < 0 || targetCol >= targetCells.length) return false;
+    const target = targetCells[targetCol];
+    target.focus();
+    target.select();
+    return true;
+  }
+
+  document.addEventListener("keydown", (event) => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement)) return;
+    if (!input.closest("[data-order-table]")) return;
+    if (!input.hasAttribute("data-ot-cell")) return;
+
+    if (event.key === "Escape") {
+      if (input.dataset.otPrev !== undefined && input.dataset.otPrev !== input.value) {
+        input.value = input.dataset.otPrev;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      input.select();
+      event.preventDefault();
+      return;
+    }
+
+    let rowDelta = 0;
+    let colDelta = 0;
+    if (event.key === "ArrowUp") rowDelta = -1;
+    else if (event.key === "ArrowDown") rowDelta = 1;
+    else if (event.key === "Enter") rowDelta = event.shiftKey ? -1 : 1;
+    else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      const length = input.value.length;
+      const allSelected = length > 0 && input.selectionStart === 0 && input.selectionEnd === length;
+      const atStart = input.selectionStart === 0 && input.selectionEnd === 0;
+      const atEnd = input.selectionStart === length && input.selectionEnd === length;
+      if (event.key === "ArrowLeft" && (allSelected || atStart || length === 0)) colDelta = -1;
+      else if (event.key === "ArrowRight" && (allSelected || atEnd || length === 0)) colDelta = 1;
+      else return;
+    } else {
+      return;
+    }
+
+    if (moveFocus(input, rowDelta, colDelta)) {
+      event.preventDefault();
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+    }
   });
 
   document.addEventListener("click", (event) => {
