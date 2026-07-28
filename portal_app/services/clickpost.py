@@ -9,6 +9,7 @@ import re
 import time
 import unicodedata
 import warnings as warning_module
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -17,6 +18,7 @@ from urllib.parse import urljoin
 
 import openpyxl
 
+from portal_app.services.excel_io import excel_read_snapshot
 from portal_app.services.master_cache import cached_by_mtime
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
@@ -3026,7 +3028,12 @@ def _load_product_list_rules(
     warnings: list[str],
 ) -> None:
     try:
-        workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        # OneDrive上のブックは一時コピーを解析する（ロック衝突回避）。
+        # read_only=True はハンドルを保持するため、コピーを開いたまま走査し、
+        # close 後に excel_read_snapshot がコピーを削除する。
+        stack = ExitStack()
+        snapshot = stack.enter_context(excel_read_snapshot(path))
+        workbook = openpyxl.load_workbook(snapshot, read_only=True, data_only=True)
     except Exception as exc:
         warnings.append(f"クリックポスト対象商品リストを読み込めませんでした: {exc}")
         return
@@ -3046,6 +3053,7 @@ def _load_product_list_rules(
                 rules[code] = ContentRule(prefix=prefix, default_quantity=quantity)
     finally:
         workbook.close()
+        stack.close()
 
 
 def _load_master_content_rules(
@@ -3070,9 +3078,12 @@ def _read_master_content_rules_impl(
     rules: dict[str, ContentRule] = {}
     warnings: list[str] = []
     try:
-        with warning_module.catch_warnings():
-            warning_module.simplefilter("ignore", UserWarning)
-            workbook = openpyxl.load_workbook(path, read_only=False, data_only=True, keep_vba=True)
+        # OneDrive上の商品管理シートは一時コピーを解析する（ロック衝突回避）。
+        # read_only=False はロード時に全読みするため、with を抜けた後も操作できる。
+        with excel_read_snapshot(path) as snapshot:
+            with warning_module.catch_warnings():
+                warning_module.simplefilter("ignore", UserWarning)
+                workbook = openpyxl.load_workbook(snapshot, read_only=False, data_only=True, keep_vba=True)
     except Exception as exc:
         warnings.append(f"商品管理シートの内容品リストを読み込めませんでした: {exc}")
         return rules, warnings

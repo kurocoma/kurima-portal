@@ -9,6 +9,7 @@ import warnings
 
 import pandas as pd
 
+from portal_app.services.excel_io import excel_read_snapshot
 from portal_app.services.paths import PortalPaths, find_portal_paths, latest_order_csv
 from portal_app.services.master_cache import cached_by_mtime
 
@@ -144,24 +145,27 @@ def read_master_tables(master_book: Path) -> MasterTables:
 
 
 def _read_master_tables_impl(master_book: Path) -> MasterTables:
-    product_master = pd.read_excel(
-        master_book,
-        sheet_name="商品マスタ",
-        dtype=str,
-        engine="openpyxl",
-    ).fillna("")
-    choice_master = pd.read_excel(
-        master_book,
-        sheet_name="NEオプション一覧",
-        dtype=str,
-        engine="openpyxl",
-    ).fillna("")
-    shimanoya_master = pd.read_excel(
-        master_book,
-        sheet_name="しまのや商品コード一覧",
-        dtype=str,
-        engine="openpyxl",
-    ).fillna("")
+    # OneDrive上の商品管理シートを直接開かず、一時コピーを解析する
+    # （Excel編集・OneDrive同期とのロック衝突回避。excel_io の docstring 参照）。
+    with excel_read_snapshot(master_book) as snapshot:
+        product_master = pd.read_excel(
+            snapshot,
+            sheet_name="商品マスタ",
+            dtype=str,
+            engine="openpyxl",
+        ).fillna("")
+        choice_master = pd.read_excel(
+            snapshot,
+            sheet_name="NEオプション一覧",
+            dtype=str,
+            engine="openpyxl",
+        ).fillna("")
+        shimanoya_master = pd.read_excel(
+            snapshot,
+            sheet_name="しまのや商品コード一覧",
+            dtype=str,
+            engine="openpyxl",
+        ).fillna("")
 
     product_master = _clean_columns(product_master)
     choice_master = _clean_columns(choice_master)

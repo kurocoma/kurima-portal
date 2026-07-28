@@ -6,6 +6,8 @@ from pathlib import Path
 
 import openpyxl
 
+from portal_app.services.excel_io import excel_read_snapshot
+
 
 DEFAULT_CREDENTIAL_PATH = (
     Path.home() / "開発案件" / "日別売上集計データダウンロード" / "docs" / "ID・PW.xlsx"
@@ -38,20 +40,22 @@ def _load_from_workbook(path: Path) -> NextEngineCredential:
             f"NEXT_ENGINE_CREDENTIAL_PATH を設定してください: {path}"
         )
 
-    workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    try:
-        sheet = workbook.active
-        for row in sheet.iter_rows(min_row=2, values_only=True):
-            site_label = str(row[0] or "").strip()
-            if site_label != "ネクストエンジン":
-                continue
+    # OneDrive等の共有フォルダ上でもロック衝突しないよう一時コピーを解析する。
+    with excel_read_snapshot(path) as snapshot:
+        workbook = openpyxl.load_workbook(snapshot, read_only=True, data_only=True)
+        try:
+            sheet = workbook.active
+            for row in sheet.iter_rows(min_row=2, values_only=True):
+                site_label = str(row[0] or "").strip()
+                if site_label != "ネクストエンジン":
+                    continue
 
-            login_id = str(row[1] or "").strip()
-            password = str(row[2] or "").strip()
-            if not login_id or not password:
-                break
-            return NextEngineCredential(login_id=login_id, password=password)
-    finally:
-        workbook.close()
+                login_id = str(row[1] or "").strip()
+                password = str(row[2] or "").strip()
+                if not login_id or not password:
+                    break
+                return NextEngineCredential(login_id=login_id, password=password)
+        finally:
+            workbook.close()
 
     raise ValueError(f"認証情報ファイルにネクストエンジン行が見つかりません: {path}")

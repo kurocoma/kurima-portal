@@ -14,6 +14,7 @@ import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.utils import range_boundaries
 
+from portal_app.services.excel_io import excel_read_snapshot
 from portal_app.services.master_cache import cached_by_mtime
 
 from portal_app.services.paths import PortalPaths, find_portal_paths
@@ -882,9 +883,11 @@ def read_excel_table(workbook_path: Path, table_name: str) -> list[dict[str, obj
 
 
 def _read_excel_table_impl(workbook_path: Path, table_name: str) -> list[dict[str, object]]:
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
-        workbook = load_workbook(workbook_path, read_only=False, data_only=True, keep_vba=False)
+    # OneDrive上のブックを直接開かず、一時コピーを解析する（ロック衝突回避）。
+    with excel_read_snapshot(workbook_path) as snapshot:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            workbook = load_workbook(snapshot, read_only=False, data_only=True, keep_vba=False)
 
     try:
         for worksheet in workbook.worksheets:
