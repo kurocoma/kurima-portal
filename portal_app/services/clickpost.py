@@ -1624,6 +1624,21 @@ class ClickPostClient:
                     await self._import_csv_to_payment_page(page, csv_file)
                     ready_for_payment = await _page_contains(page, "まとめ申込 支払手続き", timeout=60000)
                     if ready_for_payment:
+                        # 支払いボタンは行ごとに遅れて描画されることがあり、即時カウントだと
+                        # 描画途中の件数で誤停止する（2026-07-29 実障害: csv_rows=3 buttons=2。
+                        # 同一CSVの再実行は成功＝タイミング起因）。期待件数まで待ってから判定する。
+                        try:
+                            await page.wait_for_function(
+                                """
+                                (expected) => document.querySelectorAll(
+                                  'input.ywallet_button, input[name^="wallet_button["]'
+                                ).length === expected
+                                """,
+                                arg=target_rows,
+                                timeout=15000,
+                            )
+                        except PlaywrightTimeoutError:
+                            pass
                         visible_payment_buttons = await _count_visible(
                             page.locator('input.ywallet_button, input[name^="wallet_button["]')
                         )
