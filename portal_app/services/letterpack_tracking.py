@@ -46,6 +46,11 @@ def classify_scan_value(raw: object) -> ScanClassification:
     - それ以外 → unknown
     """
     text = str(raw or "").strip()
+    # スキャナ設定によっては CODE39 のスタート/ストップ(*)付きで送信され、
+    # 手入力ではシール表記どおりの区切り（1234-5678-9012）が入ることがあるため、
+    # 判定前に取り除く（2026-07-31 送り状スキャン検証で判明した取りこぼし）。
+    text = text.strip("*").strip()
+    text = re.sub(r"[-‐－ー−]", "", text)
     if not text:
         return ScanClassification("unknown", "", "空の入力です")
 
