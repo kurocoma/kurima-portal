@@ -6,6 +6,11 @@
   const SAVE_URL = "/inventory/takaesu/order-table/save";
   const RESET_URL = "/inventory/takaesu/order-table/reset";
   const SAVE_DEBOUNCE_MS = 800;
+  // メール貼り付け用のコピー対象（2026-08-02 依頼: この3列のみ）
+  const COPY_COLUMNS = ["仕入先CD", "商品名", "発注数"];
+  const COL_WIDTH_STORAGE_KEY = "takaesu-order-table-col-widths";
+  // 文字が列幅に収まらないときの縮小段階（Excelの「縮小して全体を表示」相当）
+  const FIT_FONT_SIZES_PX = [12.5, 11.5, 10.5, 9.5];
 
   let saveTimer = null;
   let saving = false;
@@ -111,7 +116,7 @@
   }
 
   async function copyTable(button) {
-    const cols = columns();
+    const cols = COPY_COLUMNS;
     const rows = collectRows();
     const tsv = [
       cols.join("\t"),
@@ -169,8 +174,117 @@
     }
   }
 
+  // ---- 商品名などの「縮小して全体を表示」と列幅の手動変更 ----
+
+  function fitFont(input) {
+    if (!(input instanceof HTMLInputElement)) return;
+    input.style.fontSize = "";
+    input.title = input.value;  // 縮小しても読みにくい場合はホバーで全文表示
+    if (input.clientWidth === 0) return;
+    for (const size of FIT_FONT_SIZES_PX) {
+      if (input.scrollWidth <= input.clientWidth) break;
+      input.style.fontSize = size + "px";
+    }
+  }
+
+  function fitAllFonts(container) {
+    for (const input of container.querySelectorAll("input[data-ot-cell]")) {
+      fitFont(input);
+    }
+  }
+
+  function fitColumnFonts(container, column) {
+    for (const input of container.querySelectorAll(`input[data-ot-cell="${column}"]`)) {
+      fitFont(input);
+    }
+  }
+
+  function loadColWidths() {
+    try {
+      return JSON.parse(localStorage.getItem(COL_WIDTH_STORAGE_KEY) || "{}") || {};
+    } catch (error) {
+      return {};
+    }
+  }
+
+  let widthSaveTimer = null;
+
+  function initTable(container) {
+    // 列幅の復元（端末ごとに localStorage 保存）→ 監視開始 → 文字サイズ調整
+    const saved = loadColWidths();
+    const headers = container.querySelectorAll("th[data-ot-col]");
+    for (const th of headers) {
+      const column = th.getAttribute("data-ot-col");
+      if (saved[column]) th.style.width = saved[column] + "px";
+    }
+    fitAllFonts(container);
+
+    const observer = new ResizeObserver((entries) => {
+      const widths = loadColWidths();
+      for (const entry of entries) {
+        const column = entry.target.getAttribute("data-ot-col");
+        if (!column) continue;
+        widths[column] = Math.round(entry.target.getBoundingClientRect().width);
+        fitColumnFonts(container, column);
+      }
+      if (widthSaveTimer) clearTimeout(widthSaveTimer);
+      widthSaveTimer = setTimeout(() => {
+        try {
+          localStorage.setItem(COL_WIDTH_STORAGE_KEY, JSON.stringify(widths));
+        } catch (error) { /* private mode 等では保存しない */ }
+      }, 400);
+    });
+    for (const th of headers) observer.observe(th);
+  }
+
+  function saveColumnWidth(th) {
+    const column = th.getAttribute("data-ot-col");
+    if (!column) return;
+    const widths = loadColWidths();
+    widths[column] = Math.round(th.getBoundingClientRect().width);
+    try {
+      localStorage.setItem(COL_WIDTH_STORAGE_KEY, JSON.stringify(widths));
+    } catch (error) { /* private mode 等では保存しない */ }
+  }
+
+  // 列幅ドラッグの確定はドラッグ終了(mouseup)でも処理する。ResizeObserver は
+  // レンダリングフレームに依存し、バックグラウンドタブでは発火しないため二重化。
+  document.addEventListener("mouseup", (event) => {
+    const th = event.target instanceof HTMLElement ? event.target.closest("th[data-ot-col]") : null;
+    if (!th) return;
+    const container = th.closest("[data-order-table]");
+    if (!container) return;
+    fitColumnFonts(container, th.getAttribute("data-ot-col"));
+    saveColumnWidth(th);
+  });
+
+  // バックグラウンドで描画された表は、表示された時点で文字サイズを合わせ直す
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    const container = root();
+    if (container) fitAllFonts(container);
+  });
+
+  // fragment は遅延ロード/作り直しで後から挿入されるため、出現を監視して初期化する
+  const appearanceObserver = new MutationObserver(() => {
+    const container = root();
+    if (container && container.hasAttribute("data-order-table") && !container.dataset.otInit) {
+      container.dataset.otInit = "1";
+      initTable(container);
+    }
+  });
+  appearanceObserver.observe(document.documentElement, { childList: true, subtree: true });
+  document.addEventListener("DOMContentLoaded", () => {
+    const container = root();
+    if (container && container.hasAttribute("data-order-table") && !container.dataset.otInit) {
+      container.dataset.otInit = "1";
+      initTable(container);
+    }
+  });
+
   document.addEventListener("input", (event) => {
     if (event.target instanceof HTMLElement && event.target.closest("[data-order-table]")) {
+      if (event.target instanceof HTMLInputElement) fitFont(event.target);
       scheduleSave();
     }
   });

@@ -11,6 +11,11 @@
 {% else %}
 <section class="panel mt-14" id="takaesu-order-table" data-order-table>
   <style>
+    #takaesu-order-table .ot-table { table-layout: fixed; }
+    #takaesu-order-table .ot-table th[data-ot-col] {
+      /* 列幅はヘッダーの右下ハンドルをドラッグして手動変更できる（端末ごとに保存） */
+      resize: horizontal; overflow: hidden; min-width: 44px;
+    }
     #takaesu-order-table .ot-table input {
       width: 100%; border: none; background: transparent; font: inherit;
       color: inherit; padding: 2px 4px; box-sizing: border-box;
@@ -18,7 +23,7 @@
     #takaesu-order-table .ot-table input:focus {
       outline: 2px solid var(--primary, #4a90d9); background: #fff; border-radius: 4px;
     }
-    #takaesu-order-table .ot-table td { padding: 2px 6px; }
+    #takaesu-order-table .ot-table td { padding: 2px 6px; overflow: hidden; }
     #takaesu-order-table .ot-table .ot-qty input { text-align: right; }
     #takaesu-order-table .ot-del {
       border: none; background: transparent; color: #b04a3a; cursor: pointer;
@@ -32,7 +37,9 @@
   <h2 class="panel-title">発注表（編集・メール貼り付け用）</h2>
   <p class="panel-lead">
     数量の変更や行の追加・削除ができます（変更は自動保存）。
-    「表をコピー」を押すと、メール本文やExcelにそのまま貼り付けられる表がコピーされます。
+    「表をコピー」を押すと、<strong>仕入先CD・商品名・発注数の3列</strong>が
+    メール本文やExcelにそのまま貼り付けられる表としてコピーされます。
+    列の幅は見出しの右端をドラッグで変更できます（文字が収まらないときは自動で縮小表示）。
   </p>
 
   <div class="btn-row" style="align-items:center;gap:10px;">
@@ -51,7 +58,8 @@
     <table class="tbl tbl-min-760 ot-table" data-ot-table>
       <thead>
         <tr>
-          {% for column in order_table_columns %}<th>{{ column }}</th>{% endfor %}
+          {% set col_widths = {"JANコード": 118, "仕入先CD": 82, "商品名": 320, "発注数": 64, "受注数": 64, "備考": 140} %}
+          {% for column in order_table_columns %}<th data-ot-col="{{ column }}" style="width:{{ col_widths.get(column, 100) }}px;">{{ column }}</th>{% endfor %}
           <th style="width:36px;"></th>
         </tr>
       </thead>
