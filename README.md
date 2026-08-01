@@ -35,6 +35,10 @@ powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 ## セットアップ（新しいPC）
 
+> 導入作業を AI アシスタントに依頼する場合は、実行手順・検証・失敗時の分岐をまとめた
+> [docs/SETUP_AI_GUIDE.md](docs/SETUP_AI_GUIDE.md) をそのまま AI に渡してください
+> （Python 未導入の PC にも対応）。
+
 **かんたんな方法（推奨）**: リポジトリ直下の `setup.bat` を実行（ダブルクリック）します。
 uv の導入（未導入なら winget → 公式スクリプトの順で自動導入）→ `uv sync` →
 Playwright ブラウザ導入 → `.env` 作成 → 環境診断（`scripts/doctor.py`）まで自動で行います。
