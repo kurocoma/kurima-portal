@@ -12,6 +12,9 @@ LIBRARY_FOLDER = "くりまポータル - ドキュメント"
 MASTER_FILE_NAME = "商品管理シート.xlsm"
 ORDER_RELATIVE_PARTS = ("ネクストエンジン", "発注関連", "受注明細一覧")
 TOOL_RELATIVE_PARTS = ("ネクストエンジン", "発注関連")
+# クーポン明細（楽天RMS受注データ「クーポン」テンプレート）の保存先。
+COUPON_RELATIVE_PARTS = ("入金明細", "クーポン")
+COUPON_TEMPLATE_NAME = "【テンプレート】○○月クーポン利用 .xlsm"
 
 
 @dataclass(frozen=True)
@@ -134,6 +137,63 @@ class BillingStatementsPaths:
     staging_dir: Path
     quarantine_dir: Path
     manifest_path: Path
+
+
+@dataclass(frozen=True)
+class CouponPaths:
+    """クーポン明細の保存先（入金明細/クーポン 配下）。"""
+
+    root: Path
+    csv_dir: Path
+    template_path: Path
+
+
+def coupon_candidate_dirs() -> list[Path]:
+    """クーポンフォルダの候補を優先順で返す（存在確認はしない）。
+
+    KURIMA_COUPON_DIR で直接指定できるのが最優先。未設定なら
+    candidate_portal_roots() の各ルート配下 入金明細/クーポン を候補にする
+    （SharePoint 同期パスは PC ごとに異なるため、単一の絶対パスを埋め込まない）。
+    """
+
+    explicit = _path_from_env("KURIMA_COUPON_DIR")
+    candidates: list[Path] = [explicit] if explicit else []
+    candidates.extend(root.joinpath(*COUPON_RELATIVE_PARTS) for root in candidate_portal_roots())
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate).lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+    return unique
+
+
+def find_coupon_paths() -> CouponPaths:
+    """クーポン明細の各パスを解決する（csv ディレクトリは無ければ作成しない）。
+
+    テンプレート xlsm のファイル名は KURIMA_COUPON_TEMPLATE_NAME で上書きできる
+    （ファイル名の表記ゆれ・改名に備える）。
+    """
+
+    override = os.environ.get("KURIMA_COUPON_TEMPLATE_NAME", "").strip()
+    template_name = override or COUPON_TEMPLATE_NAME
+    for root in coupon_candidate_dirs():
+        if root.is_dir():
+            return CouponPaths(
+                root=root,
+                csv_dir=root / "csv",
+                template_path=root / template_name,
+            )
+
+    checked = "\n".join(str(path) for path in coupon_candidate_dirs())
+    raise FileNotFoundError(
+        "クーポン明細フォルダ（入金明細/クーポン）を検出できませんでした。"
+        "KURIMA_COUPON_DIR（または KURIMA_PORTAL_ROOT）を設定するか、"
+        "SharePoint ライブラリを同期してください。\n"
+        f"確認した候補:\n{checked}"
+    )
 
 
 def find_access_analytics_paths() -> AccessAnalyticsPaths:

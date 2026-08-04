@@ -59,6 +59,11 @@ from portal_app.services.clickpost import (
     preview_clickpost_csv,
     upload_clickpost_csv_sync,
 )
+from portal_app.services.coupon_statements import (
+    download_coupon_statements_sync,
+    read_coupon_preview,
+    resolve_coupon_csv_path,
+)
 from portal_app.services.inventory import analyze_latest_inventory, result_to_csv
 from portal_app.services.inventory_pdf import inventory_result_to_pdf, takaesu_order_sheet_to_pdf
 from portal_app.services.letterpack_pdf import create_letterpack_label_pdf
@@ -3528,6 +3533,140 @@ def billing_download(mall: str, artifact_id: str):
     path = resolve_billing_artifact_path(artifact_id) if belongs else None
     if path is None:
         return PlainTextResponse("ファイルが見つかりません。", status_code=404)
+    return FileResponse(path, filename=path.name)
+
+
+@app.get("/coupon", response_class=HTMLResponse)
+def coupon_page(request: Request):
+    return templates.TemplateResponse(
+        "coupon.html",
+        {
+            "request": request,
+            "defer_preview": True,
+            "result": None,
+            "error": None,
+        },
+    )
+
+
+@app.get("/coupon/preview", response_class=HTMLResponse)
+def coupon_preview(request: Request):
+    try:
+        result = read_coupon_preview()
+        preview_error = None
+    except Exception as exc:
+        result = None
+        preview_error = str(exc)
+    return templates.TemplateResponse(
+        "_coupon_results.html",
+        {
+            "request": request,
+            "result": result,
+            "preview_error": preview_error,
+        },
+    )
+
+
+@app.post("/coupon/start")
+async def coupon_start(request: Request):
+    form = await _read_form(request)
+    # 集計ブックの複製は既定で行う。チェックを外したときだけ skip_workbook が送られる。
+    copy_workbook = not _form_bool(form, "skip_workbook")
+    headless = not _form_headed(form)
+
+    def worker(job_id: str) -> None:
+        active_keys = ("login_check", "create_data")
+        for key in active_keys:
+            progress_jobs.update_step(job_id, key, status="running")
+        try:
+            if progress_jobs.is_cancel_requested(job_id):
+                raise JobCancelled()
+            result = download_coupon_statements_sync(
+                execute=True,
+                copy_workbook=copy_workbook,
+                headless=headless,
+                # 5〜20分かかる処理なので、待機ループの中から中止要求を確認させる
+                # （工程の切れ目でしか見ないと「実行を中止」が効かない）。
+                cancel_check=lambda: progress_jobs.is_cancel_requested(job_id),
+            )
+            if progress_jobs.is_cancel_requested(job_id):
+                raise JobCancelled()
+        except Exception:
+            _mark_steps_failed(job_id, active_keys + ("save_csv", "copy_workbook"))
+            raise
+        for key in active_keys:
+            progress_jobs.update_step(job_id, key, status="completed")
+        progress_jobs.update_step(
+            job_id,
+            "save_csv",
+            status="completed" if result.csv_path else "failed",
+            detail=(
+                f"{result.csv_path.name} を保存しました。"
+                if result.csv_path
+                else (result.skipped_reason or "CSVを保存していません。")
+            ),
+        )
+        progress_jobs.update_step(
+            job_id,
+            "copy_workbook",
+            status="completed",
+            detail=(
+                f"{result.workbook_path.name} を作成しました。"
+                if result.workbook_created and result.workbook_path
+                else (
+                    f"{result.workbook_path.name} は既にあるためそのままにしました。"
+                    if result.workbook_path
+                    else "ブックの複製は行いませんでした。"
+                )
+            ),
+        )
+        progress_jobs.finish(
+            job_id,
+            message=(
+                f"{result.period.label}のクーポン明細を保存しました。"
+                if result.csv_path
+                else (result.skipped_reason or "保存対象がありませんでした。")
+            ),
+            result={
+                "period": result.period.label,
+                "csv_name": result.csv_path.name if result.csv_path else None,
+                "csv_rows": result.csv_rows,
+                "workbook_name": (
+                    result.workbook_path.name if result.workbook_path else None
+                ),
+                "workbook_created": result.workbook_created,
+                "warnings": list(result.warnings),
+            },
+        )
+
+    job_id = progress_jobs.start(
+        title="クーポン明細取得",
+        steps=[
+            ("login_check", "楽天RMSログイン確認"),
+            ("create_data", "期間・テンプレート指定とデータ作成"),
+            ("save_csv", "CSVダウンロード・保存"),
+            ("copy_workbook", "集計ブックの複製"),
+        ],
+        worker=worker,
+        workflow="coupon_statements",
+        metadata={"copy_workbook": copy_workbook},
+    )
+    return {"job_id": job_id}
+
+
+@app.post("/coupon")
+async def coupon_fallback(request: Request):
+    started = await coupon_start(request)
+    if isinstance(started, Response):
+        return started
+    return RedirectResponse(url="/coupon", status_code=303)
+
+
+@app.get("/coupon/download/csv")
+def coupon_download_csv():
+    path = resolve_coupon_csv_path()
+    if path is None:
+        return PlainTextResponse("保存済みのクーポン明細CSVがありません。", status_code=404)
     return FileResponse(path, filename=path.name)
 
 

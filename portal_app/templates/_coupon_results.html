@@ -1,0 +1,91 @@
+{# 結果マークアップは coupon.html の非遅延ロード分岐と同期して更新する。 #}
+{% if preview_error %}
+  <div class="note error">
+    <div class="note-title">保存状況を確認できませんでした</div>
+    <p>{{ preview_error }}</p>
+  </div>
+{% elif result %}
+  <div class="result-bar">
+    {% if result.csv_exists %}
+      <span class="tag-ok">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2f7d57" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+        {{ result.period_label }}分のCSVを取得済み
+      </span>
+    {% else %}
+      <span class="tag-need">{{ result.period_label }}分のCSVは未取得です</span>
+    {% endif %}
+    {% if result.csv_fetched_at %}<span class="result-sub">{{ result.csv_fetched_at }} 取得</span>{% endif %}
+  </div>
+
+  <div class="tbl-wrap">
+    <div class="tbl-scroll">
+      <table class="tbl tbl-min-560">
+        <thead>
+          <tr><th>成果物</th><th>ファイル名</th><th>状態</th><th class="num">件数</th><th>ダウンロード</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>クーポン明細CSV</td>
+            <td class="mono">{{ result.csv_name }}</td>
+            <td>
+              {% if result.csv_exists %}
+                <span class="tag-ok"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#2f7d57" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>保存済み</span>
+              {% else %}
+                <span class="tag-need">未取得</span>
+              {% endif %}
+            </td>
+            <td class="num">{% if result.csv_rows is not none %}{{ "{:,}".format(result.csv_rows) }}{% else %}—{% endif %}</td>
+            <td>{% if result.csv_exists %}<a class="file-link" href="/coupon/download/csv">CSVをダウンロード</a>{% else %}—{% endif %}</td>
+          </tr>
+          <tr>
+            <td>集計ブック（xlsm）</td>
+            <td class="mono">{{ result.workbook_actual_name or result.workbook_name }}</td>
+            <td>
+              {% if result.workbook_exists %}
+                <span class="tag-ok"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#2f7d57" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>作成済み</span>
+              {% else %}
+                <span class="tag-need">未作成</span>
+              {% endif %}
+            </td>
+            <td class="num">—</td>
+            <td>—</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  {% if not result.template_exists %}
+    <div class="note warn mt-14">
+      <div class="note-title">確認事項</div>
+      <p>テンプレート「{{ result.template_name }}」が見つかりません。ブックの複製はスキップされます。</p>
+    </div>
+  {% endif %}
+
+  <details class="fold mt-14">
+    <summary>取得の詳細（技術情報）<span class="fold-hint">開閉</span></summary>
+    <div class="fold-body">
+      <dl class="kv narrow">
+        <dt>対象期間</dt>
+        <dd class="mono">{{ result.period_range }}</dd>
+        <dt>CSV保存先</dt>
+        <dd class="mono">{{ result.csv_dir }}</dd>
+        <dt>ブック保存先</dt>
+        <dd class="mono">{{ result.workbook_dir }}</dd>
+        {% if result.csv_bytes is not none %}
+          <dt>CSVサイズ</dt>
+          <dd>{{ "{:,}".format(result.csv_bytes) }} バイト</dd>
+        {% endif %}
+        {% if result.workbook_exists %}
+          <dt>ブックのデータ参照先</dt>
+          <dd class="mono">{{ result.source_file_path or "（読み取れませんでした）" }}{{ result.source_file_name }}</dd>
+        {% endif %}
+      </dl>
+    </div>
+  </details>
+{% else %}
+  <div class="note">
+    <div class="note-title">まだ取得していません</div>
+    <p>「クーポン明細を取得」を押すと、前月分のCSVを取得して集計ブックを作成します。</p>
+  </div>
+{% endif %}

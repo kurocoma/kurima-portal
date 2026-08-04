@@ -203,6 +203,21 @@ SETTINGS_CATALOG: tuple[tuple[str, tuple[tuple[str, str, bool], ...]], ...] = (
         ),
     ),
     (
+        "クーポン明細取得",
+        (
+            ("KURIMA_COUPON_DIR", "クーポンフォルダ（入金明細/クーポン）の個別上書き", False),
+            ("KURIMA_COUPON_TEMPLATE_NAME", "テンプレート xlsm のファイル名上書き", False),
+            ("KURIMA_COUPON_CHROME_PROFILE", "クーポン明細取得専用ブラウザプロファイル", False),
+            ("KURIMA_COUPON_DATA_WAIT_SECONDS", "RMSのデータ作成完了待ち上限秒（既定 1800）", False),
+            ("KURIMA_RAKUTEN_CSV_DL_USER", "RMS CSVダウンロード用ID（未設定なら ID・PW.xlsx）", True),
+            ("KURIMA_RAKUTEN_CSV_DL_PASSWORD", "RMS CSVダウンロード用パスワード", True),
+            ("KURIMA_RAKUTEN_KANRI_LOGIN_ID", "R-Login（管理）ID", True),
+            ("KURIMA_RAKUTEN_KANRI_PASSWORD", "R-Login（管理）パスワード", True),
+            ("KURIMA_RAKUTEN_LOGIN_ID", "楽天会員ログインID", True),
+            ("KURIMA_RAKUTEN_LOGIN_PASSWORD", "楽天会員パスワード", True),
+        ),
+    ),
+    (
         "ブラウザ実体（Playwright）",
         (
             ("PLAYWRIGHT_CHROMIUM_EXECUTABLE", "使用ブラウザ実行ファイルの固定", False),

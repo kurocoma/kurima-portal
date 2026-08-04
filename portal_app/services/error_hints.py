@@ -76,6 +76,36 @@ _PORTAL_FETCH_STATE_HINTS = {
     "SESSION_RENEWAL_REQUIRED": (
         "セッション期限が近いため安全停止しました。再ログイン後に再実行してください。"
     ),
+    # クーポン明細取得（coupon_statements）の安全停止
+    "FILE_LOCKED": (
+        "保存先のファイルが使用中のため、書き換えずに停止しました。"
+        "対象のCSV・Excelブックを開いていたら閉じて、もう一度実行してください。"
+    ),
+    "SAVE_FAILED": (
+        "保存先へ書き込めませんでした。フォルダのアクセス権と空き容量、"
+        "SharePoint の同期状態を確認してから再実行してください。"
+    ),
+    "INVALID_DOWNLOAD": (
+        "ダウンロードした内容がCSVではありませんでした（ログイン切れの可能性）。"
+        "既存ファイルは保護しています。画面表示モードでログインし直してから再実行してください。"
+    ),
+    "DATA_CREATION_TIMEOUT": (
+        "楽天RMS側のデータ作成が待ち時間内に終わりませんでした。"
+        "しばらく後にRMSの「ダウンロード利用履歴」から取得するか、"
+        "KURIMA_COUPON_DATA_WAIT_SECONDS を延ばして再実行してください。"
+    ),
+    "PERIOD_NOT_AVAILABLE": (
+        "指定期間が楽天RMSの選択可能範囲を外れています（保持期間切れの可能性）。"
+        "RMSの画面で選べる期間を確認してください。"
+    ),
+    "TEMPLATE_CONTRACT_CHANGED": (
+        "集計ブックのテンプレート構成が変わった可能性があります。"
+        "テンプレートを変更せず開発担当へ連絡してください。"
+    ),
+    "PATH_NOT_FOUND": (
+        "保存先フォルダを検出できませんでした。SharePoint の同期を確認するか、"
+        ".env の KURIMA_COUPON_DIR / KURIMA_PORTAL_ROOT を設定してください。"
+    ),
 }
 
 

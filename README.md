@@ -11,6 +11,7 @@ Playwright で Next Engine / ヤマトB2 / クリックポストを自動操作�
 - **在庫明細確認** — Next Engine から受注明細CSVを取得し、商品マスタと照合して発注用の集計を作成（通常/高江洲タブ、CSV・PDF出力）
 - **ヤマト伝票** — 受注データ取得、住所補正、B2取込用CSV作成、ヤマトB2への取込
 - **クリックポスト** — 申込データ作成、レターパック宛名PDF、取込・決済・送り状番号取得
+- **クーポン明細取得** — 楽天RMSの受注データ（出力テンプレート「クーポン」）から前月分CSVを取得し、`入金明細/クーポン/csv/{YYMM}_coupon.csv` へ保存。あわせて集計ブック「{N}月クーポン利用 .xlsm」をテンプレートから複製
 - **実行履歴**（`/jobs`）— バックグラウンドジョブの完了/失敗履歴。`logs/jobs/history.jsonl` に永続化され、再起動後も残る
 - **ログ一覧**（`/logs`）— `logs/` 配下のエラー・デバッグ出力に加え、共有ログ（SharePoint 側の実行ログ・エラーログ）も画面から一覧・閲覧
 - **設定**（`/settings`）— .env の設定状況（秘密はマスク）とパス解決・ログ出力先・タイムアウト実効値の見える化（閲覧のみ）
@@ -226,6 +227,41 @@ scripts\register_autostart.bat /delete    … すべて解除
 | `KURIMA_SHIPMENT_LETTERPACK_LOOKBACK_DAYS` | レターパック伝票の遡り日数（既定 30） |
 | `KURIMA_SHIPMENT_YAMATO_LOOKBACK_DAYS` | ヤマト発行済データの遡り日数（既定 30） |
 
+### クーポン明細取得
+
+| キー | 用途 |
+|---|---|
+| `KURIMA_COUPON_DIR` | クーポンフォルダ（`入金明細/クーポン`）の個別上書き。未設定ならポータルルートから解決 |
+| `KURIMA_COUPON_TEMPLATE_NAME` | テンプレート xlsm のファイル名上書き（既定 `【テンプレート】○○月クーポン利用 .xlsm`） |
+| `KURIMA_COUPON_CHROME_PROFILE` | クーポン明細取得専用のブラウザプロファイル保存先 |
+| `KURIMA_COUPON_DATA_WAIT_SECONDS` | RMS「データを作成する」の完了待ち上限秒（既定 1800。大量月は10分以上かかる） |
+| `KURIMA_COUPON_HISTORY_URL` | 「ダウンロード利用履歴」画面の直URL（未設定なら画面上のリンクからたどる） |
+| `KURIMA_RAKUTEN_KANRI_LOGIN_ID` / `KURIMA_RAKUTEN_KANRI_PASSWORD` | R-Login（楽天(管理)）の認証 |
+| `KURIMA_RAKUTEN_LOGIN_ID` / `KURIMA_RAKUTEN_LOGIN_PASSWORD` | 楽天会員（楽天(ユーザー認証)）の認証 |
+| `KURIMA_RAKUTEN_CSV_DL_USER` / `KURIMA_RAKUTEN_CSV_DL_PASSWORD` | CSVダウンロード直前の第3認証（楽天(ダウンロード用)） |
+
+楽天の認証は3種類必要です。上記 env が未設定の場合は、既存資産の認証情報Excel
+（`ID・PW.xlsx`。A列ラベル `楽天(管理)` / `楽天(ユーザー認証)` / `楽天(ダウンロード用)`）から
+自動で補完します（補完はジョブ実行中だけで、終了後は元の状態へ戻します）。
+
+安全側の動作:
+
+- 保存先の CSV・ブックを Excel で開いたままだと、上書きせずに停止して「閉じてから再実行」を案内します。
+- ダウンロードした内容が Shift-JIS の受注データCSVに見えないとき（ログイン切れの HTML など）は保存せず、
+  `data/coupon_statements/quarantine/` へ隔離します。**既存の `{YYMM}_coupon.csv` は壊れません。**
+- データ作成の待ちが上限に達した場合は、RMSの「ダウンロード利用履歴」からの回収を自動で試みます。
+- 実行中に「実行を中止」を押すと、長い待機の途中でも中止できます。
+
+集計ブックの複製では、参照セル（`filePath` / `fileName`）をこのPCの実パス・実ファイル名で
+**数式ごと静的な文字列に**置き換えます（テンプレートは無改変）。検証は次のコマンドです。
+
+```powershell
+uv run python scripts/verify_coupon_template.py
+```
+
+テンプレート修正前の原本は `data/coupon_statements/template_backup/` に退避しています
+（`--backup-dir` を付けると検査対象に含められます）。
+
 ### ブラウザ実体（Playwright）
 
 | キー | 用途 |
@@ -244,6 +280,7 @@ scripts\register_autostart.bat /delete    … すべて解除
 | `/inventory` | 在庫明細確認（通常/高江洲タブ）。プレビューは非同期読込・キャッシュ付き |
 | `/yamato` | ヤマト伝票。NE取得〜B2取込CSV作成〜B2取込 |
 | `/clickpost` | クリックポスト。CSV作成〜取込・決済・送り状取得 |
+| `/coupon` | クーポン明細取得。前月分（注文日 月初00:00:00〜月末23:59:59）のクーポン明細CSV取得と集計ブックの複製。既存の同月ブックは上書きしない |
 | `/jobs` | 実行履歴。日時・種別・結果・所要時間・エラー概要を新しい順に表示。実行中の件数はナビのバッジに常時表示 |
 | `/logs` | ログ一覧。`logs/` 配下と共有ログ（SharePoint 側、「共有」ラベル）を新しい順に一覧し、テキストログを画面で閲覧 |
 | `/settings` | 設定の見える化（閲覧のみ）。環境変数の設定状況（PASSWORD 等は先頭2文字＋***でマスク）、パス解決結果、ログ出力先、タイムアウト実効値、稼働バージョン |
@@ -287,6 +324,26 @@ scripts\register_autostart.bat /delete    … すべて解除
 - **他のPCから繋がらない** — ホストPCのファイアウォール受信許可（上記）と、`-Mode lan` で起動しているか（`0.0.0.0` で LISTEN しているか）を確認。
 - **「このパソコンからの利用は許可されていません」（403）と出る** — ホストPCの `.env` の `KURIMA_ALLOWED_CLIENTS` に、画面に表示されたIPアドレスを追加して再起動してください（設定を消せば従来どおり無制限）。
 - **実行中にページを閉じて進捗が見えなくなった** — ジョブは裏で動き続けています。同じ画面を開き直せば進捗パネルへ自動で再接続され、ナビ「実行履歴」のバッジでも実行中件数を確認できます。
+
+## テスト
+
+`tests/` はブラウザ操作を伴わない純ロジックのみで、実サイトへはアクセスしません。
+テスト用パッケージ（`pytest` / `httpx`）は `pyproject.toml` の `dev` グループにあり、
+`uv sync` で自動的に入ります。
+
+```powershell
+# 全テスト
+uv run pytest tests -q
+
+# 1ファイルだけ
+uv run pytest tests/test_coupon_statements.py -q
+
+# pytest を入れずに実行したいとき（標準ライブラリの unittest でも書かれている）
+.\.venv\Scripts\python.exe -m unittest discover -s tests -t tests -p "test_coupon*.py"
+```
+
+FastAPI の `TestClient` を使うテスト（画面ルートの登録・描画の確認）は `httpx` が必要です。
+未導入の環境では自動でスキップされます。
 
 ## CLI リファレンス
 
@@ -443,7 +500,11 @@ uv run python -m portal_app.cli convert-yamato-ne-to-b2 --write
 ### Next Engine
 
 1. `NEXT_ENGINE_LOGIN_ID` と `NEXT_ENGINE_PASSWORD`
-2. `NEXT_ENGINE_CREDENTIAL_PATH` で指定した Excel（A列=サイト名, B列=ID, C列=PW）
+2. 認証情報Excel（A列=サイト名, B列=ID, C列=PW）。場所は `KURIMA_CREDENTIAL_PATH`
+   （従来キー `NEXT_ENGINE_CREDENTIAL_PATH` も引き続き有効。両方あれば `KURIMA_` 側が優先）
+
+この Excel はネクストエンジン専用ではなく、楽天・Yahoo など各サイトの行を持つ共有ファイルです
+（クーポン明細取得の楽天3認証もここから補完します）。
 
 Playwright の同梱ブラウザが未インストールの場合は、既存の Chrome/Edge を自動検出します。固定したい場合は `PLAYWRIGHT_CHROMIUM_EXECUTABLE` に `chrome.exe` または `msedge.exe` のパスを設定してください。
 
