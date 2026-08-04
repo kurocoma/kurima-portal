@@ -5,6 +5,17 @@
   <h1 class="page-title">出荷確定</h1>
   <svg class="page-wave" width="62" height="8" viewBox="0 0 62 8" fill="none"><path d="M2 5C8 1.5 13 1.5 19 5s11 3.5 17 0 11-3.5 17 0 5 1 5 1" stroke="#3bb0d4" stroke-width="2" stroke-linecap="round"/></svg>
   <p class="page-lead">出荷済み納品書のバーコードをスキャンし、出荷確定CSVを作成してネクストエンジンへ反映します。</p>
+  <div class="note">
+    <p class="note-title">正しい操作順序（この順番で行ってください）</p>
+    <p>
+      ① バーコードをスキャン →
+      ② ヤマト発行済データ取得（必要な日のみ）→ マッピング再読込 →
+      ③ プレビューで内容を確認して「出荷確定CSV作成」→
+      ④ <strong>CSVを作成した後で</strong>「アップロード前チェック」を押し、件数と出荷予定日が今日の分か確認 →
+      ⑤ 確認チェックを入れて「ネクストエンジンへ反映」
+    </p>
+    <p><strong>注意:</strong> 「アップロード前チェック」を先に押してからCSVを作成すると、反映対象が前回のCSVのまま固定されます（2026-08-03/04 の未反映の原因）。必ず「CSV作成 → チェック → 反映」の順で操作してください。順番を誤った場合は自動で送信を止めて再チェックを案内します。</p>
+  </div>
 </div>
 
 <section class="panel">
