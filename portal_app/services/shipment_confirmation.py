@@ -427,6 +427,29 @@ async def upload_next_engine_shipment_csv(
         _append_audit_payload("shipment_upload", result)
         return result
 
+    # 2026-08-03/04 実障害: 「アップロード前チェック → CSV作成 → 反映」の順で操作すると、
+    # チェック時にフォームへ固定された前回CSVのパスが残ったまま反映が走り、
+    # 作成したばかりのCSVではなく1世代前のCSVをアップロードしてしまう
+    # （アップロード自体は成功するため「反映しました」表示になり気づけない）。
+    # 実反映では、明示指定されたCSVより新しい有効候補があれば送信せずに止める。
+    if upload_csv is not None:
+        newer = _newer_candidate_than(preview.upload_csv)
+        if newer is not None:
+            result = _replace_upload_result(
+                preview,
+                executed=False,
+                skipped_reason="stale_csv_selected",
+                warnings=(
+                    *preview.warnings,
+                    f"指定されたCSV（{preview.upload_csv.name}）より新しい候補"
+                    f"（{newer.name}）があります。「アップロード前チェック」を"
+                    "やり直してから反映してください。",
+                ),
+                audit_path=AUDIT_LOG_PATH,
+            )
+            _append_audit_payload("shipment_upload", result)
+            return result
+
     if on_upload_start is not None:
         try:
             on_upload_start(preview.source_rows)
@@ -1329,6 +1352,29 @@ def _next_yamato_tracking_path() -> Path:
         if not indexed.exists():
             return indexed
     raise RuntimeError("ヤマト発行済データCSVの保存ファイル名を決定できませんでした。")
+
+
+def _newer_candidate_than(source: Path | None) -> Path | None:
+    """明示指定されたCSVより新しい有効候補があれば返す（古い固定パスの検出用）。
+
+    「アップロード前チェックで固定したパス」より後に CSV が作り直されたケースを
+    実反映の直前に検出する。判定は最新有効候補との mtime 比較。stat 失敗時は
+    ブロックしない（None を返し従来動作のまま）。
+    """
+    if source is None:
+        return None
+    latest = _latest_completion_csv([])
+    if latest is None:
+        return None
+    try:
+        source_path = Path(source)
+        if latest.resolve() == source_path.resolve():
+            return None
+        if latest.stat().st_mtime > source_path.stat().st_mtime:
+            return latest
+    except OSError:
+        return None
+    return None
 
 
 def _latest_completion_csv(warnings: list[str]) -> Path | None:

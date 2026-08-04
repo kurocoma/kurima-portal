@@ -672,6 +672,12 @@
       setValue("target_date", el("yamato-target-date").value.trim());
     }
     if (form.id === "create-form") {
+      // 「チェック → 作成 → 反映」の順で前回チェック時の候補パスが残り、
+      // 1世代前のCSVをアップロードする事故（2026-08-03/04）の対策:
+      // CSVを作り直す時点で、固定済みの候補パスとチェック結果表示を無効化する。
+      const pinned = document.querySelector('#upload-form input[name="csv_file"]');
+      if (pinned) pinned.value = "";
+      el("upload-check-result").hidden = true;
       const payload = rows.map((row) => {
         const record = {};
         for (const column of COLUMNS) record[column] = row[column] || "";

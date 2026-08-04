@@ -1509,6 +1509,8 @@ async def shipment_confirmation_upload_start(request: Request):
                     "upload_not_confirmed": "アップロード後の画面変化を確認できず、未反映の可能性が高い",
                     "confirmation_required": "確認チェックが必要",
                     "upload_csv_not_ready": "候補CSVが反映可能な状態でない",
+                    "stale_csv_selected": "チェック後に新しいCSVが作成されたため送信を中止しました。"
+                    "「アップロード前チェック」をやり直してから反映してください",
                 }.get(result.skipped_reason or "", result.skipped_reason or "理由不明")
                 warning_tail = (
                     " " + " / ".join(list(result.warnings)[-2:]) if result.warnings else ""
