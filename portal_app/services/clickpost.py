@@ -1140,6 +1140,11 @@ class NextEngineClickPostClient:
         async with self._open_filtered_order_list() as page:
             snapshot = await _snapshot_clickpost_order_list(page)
             if expected_order_numbers and snapshot.order_numbers != expected_order_numbers:
+                # 検索反映の遅延で旧リストを掴んだ可能性に備え、一度だけ絞り込みを
+                # やり直して再取得する（それでも不一致なら本当に対象が違うので失敗させる）。
+                await _filter_clickpost_shipping_methods(page)
+                snapshot = await _snapshot_clickpost_order_list(page)
+            if expected_order_numbers and snapshot.order_numbers != expected_order_numbers:
                 return ClickPostInvoiceDownloadResult(
                     executed=execute,
                     before_list=snapshot,
@@ -3346,7 +3351,19 @@ async def _filter_clickpost_shipping_methods(page) -> None:
     if not updated.get("ok"):
         raise RuntimeError(f"クリックポスト/レターパックの発送方法を選択できませんでした: {updated}")
 
+    # 検索前の先頭行ノードを捕まえておき、検索後は「旧リストが差し替わったこと」を直接待つ。
+    # 「結果行が存在する」だけの待ちでは絞り込み反映前の旧リスト（全便種）で即通過し、
+    # そのままスナップショットして対象不一致になるレースがある（2026-08-05 10:40 実障害:
+    # 納品書対象 actual=12 vs expected=7。8分後の再実行は同一データで通過）。
+    stale_row = await page.evaluate_handle("() => document.querySelector('input[name=\"qid[]\"]')")
     await _click_search(page)
+    try:
+        await page.wait_for_function(
+            "(el) => !el || !el.isConnected", arg=stale_row, timeout=20000
+        )
+    except PlaywrightTimeoutError:
+        # 再描画で同一ノードが残る構成でも、従来どおり固定待ち＋結果待ちで先へ進む
+        pass
     await page.wait_for_timeout(3500)
     await _wait_for_clickpost_search_results(page)
 
