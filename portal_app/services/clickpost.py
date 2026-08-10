@@ -137,6 +137,26 @@ BUILDING_KEYWORDS = (
     "荘",
     "寮",
 )
+# クリックポストの申込CSVは住所を4行に分けて渡すが、1行あたり全角20文字
+# （半角換算で40幅）までしか取り込まれない。超過した行を含む明細は取込時に
+# 無視され、支払い対象件数がCSV件数に足りずガードが発火する。
+CLICKPOST_ADDRESS_LINE_COUNT = 4
+CLICKPOST_ADDRESS_LINE_WIDTH = 40
+# 番地に現れるハイフン類（「4ー12」のように長音記号が使われることがある）
+CLICKPOST_ADDRESS_HYPHENS = "-‐‑–—−ー－ｰ"
+# 番地の途中に挟まる語（ここを建物名の始まりと誤認しないため）
+CLICKPOST_ADDRESS_NUMBER_SUFFIXES = (
+    "丁目",
+    "丁",
+    "番地",
+    "番",
+    "号室",
+    "号館",
+    "号",
+    "条",
+    "地割",
+    "区画",
+)
 
 
 @dataclass(frozen=True)
@@ -2350,9 +2370,14 @@ def _convert_clickpost_csv(
         first_line = _first_detail_line(order_no, lines, warnings)
         if first_line is None:
             continue
-        address_lines = _split_clickpost_address_power_query(
+        address_lines, address_overflow = _clickpost_address_lines(
             _cell(first_line, "送り先住所") or _cell(buyer, "送り先住所")
         )
+        if address_overflow:
+            warnings.append(
+                f"受注番号 {order_no} の住所が住所4行（1行あたり全角20文字）に収まらないため"
+                f"末尾を出力できません。未出力={address_overflow}"
+            )
         converted.append(
             {
                 "お届け先郵便番号": _format_zip(_cell(first_line, "送り先〒") or _cell(buyer, "送り先〒")),
@@ -2748,8 +2773,115 @@ def _content_for_clickpost_line(
     return f"{rule.prefix}{quantity})"
 
 
-def _split_clickpost_address_power_query(address: str) -> tuple[str, str, str, str]:
+def _clickpost_text_width(text: str) -> int:
+    """全角=2・半角=1 で数えた表示幅（yamato_conversion.b2_text_width と同じ数え方）。"""
+    return sum(2 if unicodedata.east_asian_width(char) in {"F", "W", "A"} else 1 for char in text)
+
+
+def _clickpost_address_lines(address: str) -> tuple[tuple[str, str, str, str], str]:
+    """住所を申込CSVの4行へ分割する。戻り値は (4行, 4行に収まらなかった残り)。
+
+    クリックポストの住所分割はここが唯一の入口で、返す4行は必ず1行あたり
+    CLICKPOST_ADDRESS_LINE_WIDTH 幅以内になる。
+    区切りは「元データの空白」と「番地の終わり」で、語の途中では切らない。
+    元データの空白は行内に残す（宛名として読めるようにするため）。
+    残りが空でない場合は情報が欠けているので、呼び出し側で警告すること。
+    """
     text = unicodedata.normalize("NFKC", str(address or "")).strip()
+    if not text:
+        return ("", "", "", ""), ""
+    return _pack_clickpost_address_segments(_clickpost_address_segments(text))
+
+
+def _clickpost_address_segments(text: str) -> list[tuple[str, str]]:
+    """住所を意味の区切りで断片へ分解する。要素は (断片, 直前に置く区切り文字)。"""
+    segments: list[tuple[str, str]] = []
+    for atom_index, atom in enumerate(text.split()):
+        for piece_index, piece in enumerate(_split_at_address_number_end(atom)):
+            for chunk_index, chunk in enumerate(_chunk_by_clickpost_width(piece)):
+                head_of_atom = atom_index > 0 and piece_index == 0 and chunk_index == 0
+                segments.append((chunk, " " if head_of_atom else ""))
+    return segments
+
+
+def _split_at_address_number_end(atom: str) -> list[str]:
+    """空白で区切られた塊を、番地の終わりごとに分ける。"""
+    pieces: list[str] = []
+    rest = atom
+    while True:
+        index = _address_number_end(rest)
+        if index is None:
+            pieces.append(rest)
+            return pieces
+        pieces.append(rest[:index])
+        rest = rest[index:]
+
+
+def _address_number_end(text: str) -> int | None:
+    """番地が終わって建物名が始まる位置。番地が末尾まで続くなら None。
+
+    「17丁目南1-20」のように丁目・方角を挟む番地は途中で切らない。
+    「103号室」のように数字で始まる塊も切らない（切ると意味を成さないため）。
+    """
+    length = len(text)
+    index = 0
+    while index < length and not text[index].isdigit():
+        index += 1
+    if index >= length:
+        return None
+    start = index
+    while index < length:
+        char = text[index]
+        if char.isdigit() or char in CLICKPOST_ADDRESS_HYPHENS:
+            index += 1
+            continue
+        suffix = next(
+            (s for s in CLICKPOST_ADDRESS_NUMBER_SUFFIXES if text.startswith(s, index)),
+            None,
+        )
+        if suffix is None:
+            break
+        index += len(suffix)
+        while index < length and text[index] in "東西南北中":
+            index += 1
+    if index >= length or index == start:
+        return None
+    return index
+
+
+def _pack_clickpost_address_segments(
+    segments: list[tuple[str, str]],
+) -> tuple[tuple[str, str, str, str], str]:
+    """断片を、上限幅を超えない範囲で前の行へ足しながら4行に収める。"""
+    rows: list[str] = []
+    for text, separator in segments:
+        if not rows:
+            rows.append(text)
+            continue
+        candidate = rows[-1] + separator + text
+        if _clickpost_text_width(candidate) <= CLICKPOST_ADDRESS_LINE_WIDTH:
+            rows[-1] = candidate
+        else:
+            rows.append(text)
+
+    overflow = "".join(rows[CLICKPOST_ADDRESS_LINE_COUNT:])
+    rows = rows[:CLICKPOST_ADDRESS_LINE_COUNT]
+    rows += [""] * (CLICKPOST_ADDRESS_LINE_COUNT - len(rows))
+    return (rows[0], rows[1], rows[2], rows[3]), overflow
+
+
+def _split_clickpost_address_power_query(address: str) -> tuple[str, str, str, str]:
+    """従来の分割意図に上限強制だけをかけた版（既存の呼び出し互換のために残す）。
+
+    申込CSVの生成は _clickpost_address_lines を使う。新規コードもそちらを使うこと。
+    """
+    text = unicodedata.normalize("NFKC", str(address or "")).strip()
+    lines, _ = _fit_clickpost_address_lines(text, _split_clickpost_address_intent(text))
+    return lines
+
+
+def _split_clickpost_address_intent(text: str) -> tuple[str, str, str, str]:
+    """「どこで切りたいか」だけを決める従来の分割意図。上限は考慮しない。"""
     parts = [part.strip() for part in text.split(" ") if part.strip()]
     if len(parts) < 3:
         return _split_compact_clickpost_address(text)
@@ -2763,7 +2895,68 @@ def _split_clickpost_address_power_query(address: str) -> tuple[str, str, str, s
     )
 
 
+def _fit_clickpost_address_lines(
+    text: str, lines: tuple[str, str, str, str]
+) -> tuple[tuple[str, str, str, str], str]:
+    """分割意図を検査し、上限違反か情報欠落があるときだけ4行へ詰め直す。
+
+    問題がなければ分割意図をそのまま返すので、これまで正常に取り込めていた
+    住所の分割結果は変わらない。
+    """
+    rows = list(lines)[:CLICKPOST_ADDRESS_LINE_COUNT]
+    rows += [""] * (CLICKPOST_ADDRESS_LINE_COUNT - len(rows))
+    lossless = "".join(rows) == re.sub(r"\s+", "", text)
+    within_limit = all(
+        _clickpost_text_width(row) <= CLICKPOST_ADDRESS_LINE_WIDTH for row in rows
+    )
+    if lossless and within_limit:
+        return (rows[0], rows[1], rows[2], rows[3]), ""
+    return _pack_clickpost_address_lines(text)
+
+
+def _pack_clickpost_address_lines(text: str) -> tuple[tuple[str, str, str, str], str]:
+    """空白区切りを優先境界として、上限幅に収まるよう4行へ詰め直す。"""
+    chunks: list[str] = []
+    for atom in text.split():
+        chunks.extend(_chunk_by_clickpost_width(atom))
+
+    rows: list[str] = []
+    for chunk in chunks:
+        if rows and _clickpost_text_width(rows[-1] + chunk) <= CLICKPOST_ADDRESS_LINE_WIDTH:
+            rows[-1] += chunk
+        else:
+            rows.append(chunk)
+
+    overflow = "".join(rows[CLICKPOST_ADDRESS_LINE_COUNT:])
+    rows = rows[:CLICKPOST_ADDRESS_LINE_COUNT]
+    rows += [""] * (CLICKPOST_ADDRESS_LINE_COUNT - len(rows))
+    return (rows[0], rows[1], rows[2], rows[3]), overflow
+
+
+def _chunk_by_clickpost_width(text: str) -> list[str]:
+    """単体で上限幅を超える塊を、上限幅以内へ機械分割する（空白境界が無い住所向け）。"""
+    chunks: list[str] = []
+    current = ""
+    width = 0
+    for char in text:
+        char_width = _clickpost_text_width(char)
+        if current and width + char_width > CLICKPOST_ADDRESS_LINE_WIDTH:
+            chunks.append(current)
+            current = ""
+            width = 0
+        current += char
+        width += char_width
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def _split_compact_clickpost_address(address: str) -> tuple[str, str, str, str]:
+    """空白が少ない住所の分割意図（建物キーワード優先・無ければ20文字で機械分割）。
+
+    ここも上限は見ない。上限強制は _clickpost_address_lines 側で必ず行うため、
+    この関数を直接呼ばないこと。
+    """
     text = re.sub(r"\s+", "", address or "")
     if not text:
         return "", "", "", ""
