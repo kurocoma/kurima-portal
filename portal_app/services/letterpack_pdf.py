@@ -32,7 +32,9 @@ COLUMNS_PER_PAGE = 2
 LABELS_PER_PAGE = ROWS_PER_PAGE * COLUMNS_PER_PAGE
 
 COLUMN_OFFSET = 275.4
-ADDRESS_MAX_WIDTH = 210.0
+# 住所開始x=91.44 から用紙中央の裁ち線(PAGE_WIDTH/2=297.61)までは約206pt。
+# 裁ち線・プリンタ非印字領域に食い込まないよう安全余白を引いた値を上限とする。
+ADDRESS_MAX_WIDTH = 200.0
 NAME_MAX_WIDTH = 205.0
 PHONE_MAX_WIDTH = 120.0
 
@@ -41,7 +43,14 @@ BODY_FONT = "LetterPackBodyFont"
 LABEL_FONT_SIZE = 6.0
 ZIP_PHONE_FONT_SIZE = 9.96
 ADDRESS_FONT_SIZE = 11.04
+ADDRESS_MIN_FONT_SIZE = 8.25
+# 2行組み直しでも収まらない長い住所は、ここまで縮小してでも枠内に収める。
+ADDRESS_REBALANCE_MIN_FONT_SIZE = 6.0
 NAME_FONT_SIZE = 14.04
+
+# 住所の折返し位置の優先候補: 番地末尾などの数字・ハイフンと、
+# カタカナ/英字で始まる建物名との境界(例: 「713番地1|ペアーズコート」「6-1|パークシティ」)。
+_ADDRESS_BREAK_RE = re.compile(r"(?<=[0-9\-])(?=[ァ-ヶA-Za-z])")
 
 ROW_Y = (
     {
@@ -217,16 +226,12 @@ def _draw_label(
     )
 
     address_lines = _address_lines(row, warnings)
-    for line_index, line in enumerate(address_lines[:2]):
-        _draw_fit_text(
-            pdf,
-            line,
+    for line_index, (line, font_size) in enumerate(address_lines[:2]):
+        pdf.setFont(BODY_FONT, font_size)
+        pdf.drawString(
             91.44 + x_offset,
             y["address1" if line_index == 0 else "address2"],
-            BODY_FONT,
-            ADDRESS_FONT_SIZE,
-            ADDRESS_MAX_WIDTH,
-            min_size=8.25,
+            line,
         )
 
     _draw_fit_text(
@@ -298,20 +303,104 @@ def _fit_font_size(
     return max(size, min_size)
 
 
-def _address_lines(row: dict[str, str], warnings: list[str]) -> list[str]:
+def _address_lines(row: dict[str, str], warnings: list[str]) -> list[tuple[str, float]]:
+    """住所を最大2行の (テキスト, フォントサイズ) として返す。
+
+    従来どおり行ごとの縮小で収まる宛名は出力を変えず、最小サイズでも
+    幅に収まらない宛名だけを住所1+住所2の結合・再折返しで組み直す。
+    """
     address1 = _clean_text(row.get("住所1", ""))
     address2 = _clean_text(row.get("住所2", ""))
     lines = [line for line in (address1, address2) if line]
-    if len(lines) == 2:
-        return lines
-    if len(lines) == 1 and pdfmetrics.stringWidth(lines[0], BODY_FONT, ADDRESS_FONT_SIZE) <= ADDRESS_MAX_WIDTH:
-        return lines[:2]
+    if not lines:
+        return []
 
-    combined = "".join(lines)
-    wrapped = _wrap_to_width(combined, BODY_FONT, ADDRESS_FONT_SIZE, ADDRESS_MAX_WIDTH, max_lines=2)
-    if len(wrapped) > 2:
-        warnings.append(f"レターパック住所が2行に収まらないため末尾を2行目へ結合しました: {row.get('宛名2（氏名）', '')}")
-    return wrapped[:2]
+    if len(lines) == 2:
+        if all(
+            pdfmetrics.stringWidth(line, BODY_FONT, ADDRESS_MIN_FONT_SIZE) <= ADDRESS_MAX_WIDTH
+            for line in lines
+        ):
+            return [
+                (
+                    line,
+                    _fit_font_size(
+                        line,
+                        BODY_FONT,
+                        ADDRESS_FONT_SIZE,
+                        ADDRESS_MAX_WIDTH,
+                        min_size=ADDRESS_MIN_FONT_SIZE,
+                    ),
+                )
+                for line in lines
+            ]
+        return _rebalanced_address_lines("".join(lines), row, warnings)
+
+    if pdfmetrics.stringWidth(lines[0], BODY_FONT, ADDRESS_FONT_SIZE) <= ADDRESS_MAX_WIDTH:
+        return [(lines[0], ADDRESS_FONT_SIZE)]
+    return _rebalanced_address_lines(lines[0], row, warnings)
+
+
+def _rebalanced_address_lines(
+    text: str,
+    row: dict[str, str],
+    warnings: list[str],
+) -> list[tuple[str, float]]:
+    """住所全体を「2行とも幅に収まる最大フォントサイズ」で組み直す。"""
+    size = ADDRESS_FONT_SIZE
+    while size >= ADDRESS_REBALANCE_MIN_FONT_SIZE:
+        split = _split_two_lines(text, size)
+        if split is not None:
+            if size < ADDRESS_MIN_FONT_SIZE:
+                warnings.append(
+                    f"レターパック住所が長いため文字サイズを{size}ptに縮小しました: "
+                    f"{row.get('宛名2（氏名）', '')}"
+                )
+            return [(line, size) for line in split]
+        size = round(size - 0.25, 2)
+
+    wrapped = _wrap_to_width(
+        text,
+        BODY_FONT,
+        ADDRESS_REBALANCE_MIN_FONT_SIZE,
+        ADDRESS_MAX_WIDTH,
+        max_lines=2,
+    )
+    warnings.append(
+        f"レターパック住所が2行に収まらないため末尾を2行目へ結合しました: "
+        f"{row.get('宛名2（氏名）', '')}"
+    )
+    return [(line, ADDRESS_REBALANCE_MIN_FONT_SIZE) for line in wrapped[:2]]
+
+
+def _split_two_lines(text: str, font_size: float) -> list[str] | None:
+    """text を指定サイズで幅内に収まる1〜2行へ分割する。収まらなければ None。
+
+    分割位置は _ADDRESS_BREAK_RE の区切り(番地と建物名の境界など)を優先し、
+    無ければ1行目に詰められるだけ詰める。
+    """
+    if pdfmetrics.stringWidth(text, BODY_FONT, font_size) <= ADDRESS_MAX_WIDTH:
+        return [text]
+
+    max_first = 0
+    for index in range(1, len(text)):
+        if pdfmetrics.stringWidth(text[:index], BODY_FONT, font_size) > ADDRESS_MAX_WIDTH:
+            break
+        max_first = index
+    min_first: int | None = None
+    for index in range(1, len(text)):
+        if pdfmetrics.stringWidth(text[index:], BODY_FONT, font_size) <= ADDRESS_MAX_WIDTH:
+            min_first = index
+            break
+    if not max_first or min_first is None or min_first > max_first:
+        return None
+
+    breaks = [
+        match.start()
+        for match in _ADDRESS_BREAK_RE.finditer(text)
+        if min_first <= match.start() <= max_first
+    ]
+    split_at = breaks[-1] if breaks else max_first
+    return [text[:split_at], text[split_at:]]
 
 
 def _wrap_to_width(
