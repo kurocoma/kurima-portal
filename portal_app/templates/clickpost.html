@@ -117,6 +117,22 @@
       </form>
     </div>
 
+    <div class="op-row" style="flex-wrap:wrap;">
+      <div class="op-main">
+        <strong class="op-name">支払い・印字のみ再開</strong>
+        <span class="op-desc">決済が途中で止まった（残り件数あり）ときに、CSVを再取込せず残りの決済と宛名PDF保存だけ行います</span>
+      </div>
+      <form class="op-form" method="post" action="/clickpost/payment-print/start" data-progress-form data-progress-endpoint="/clickpost/payment-print/start" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <input type="hidden" name="browser_mode" value="front">
+        <input type="hidden" name="slow_mo_ms" value="150">
+        <input type="hidden" name="max_payments" value="20">
+        <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--warn);font-weight:600;white-space:nowrap;">
+          <input type="checkbox" name="confirm_execute" required style="accent-color:var(--primary);">決済まで実行
+        </label>
+        <button class="btn btn-sm" type="submit">実行</button>
+      </form>
+    </div>
+
     <div class="op-row">
       <div class="op-main">
         <strong class="op-name">申込データ作成＋取込前チェック</strong>

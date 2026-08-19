@@ -57,6 +57,12 @@ INVOICE_DOWNLOAD_BUTTON_ID = "#btn_nouhinsho_dl_exec"
 CLICKPOST_STORAGE_STATE_PATH = APP_ROOT / "data" / "storage" / "clickpost.json"
 CLICKPOST_AUDIT_LOG_DIR = APP_ROOT / "logs" / "clickpost"
 CLICKPOST_AUDIT_LOG_PATH = CLICKPOST_AUDIT_LOG_DIR / "clickpost_audit.jsonl"
+# 決済ループのボタン出現待ち。2026-08-17 実障害: ウォレット(SBPS)からの復帰描画が
+# 通常探索（3秒+1秒）より遅く、「ボタンなし＝全件完了」と誤判定して13件中7件が
+# 未決済のまま正常終了した。期待件数に未達の間は RECHECK の長い待ちで1回再確認する。
+PAYMENT_BUTTON_POLL_TIMEOUT_MS = 3000
+NEXT_PAYMENT_POLL_TIMEOUT_MS = 1000
+PAYMENT_BUTTON_RECHECK_TIMEOUT_MS = 30000
 CLICKPOST_HEADERS = (
     "お届け先郵便番号",
     "お届け先氏名",
@@ -671,6 +677,7 @@ async def complete_clickpost_payments_and_print(
     headless: bool | None = None,
     slow_mo_ms: int = 0,
     max_payments: int = 20,
+    progress_callback: Callable[[str, str, str | None], None] | None = None,
 ) -> ClickPostPaymentPrintResult:
     paths = find_clickpost_paths()
     resolved_output_dir = output_dir or paths.completed_data_dir / "clickpost_label_pdfs"
@@ -679,6 +686,7 @@ async def complete_clickpost_payments_and_print(
         execute=execute,
         output_dir=resolved_output_dir,
         max_payments=max_payments,
+        progress_callback=progress_callback,
     )
 
 
@@ -689,6 +697,7 @@ def complete_clickpost_payments_and_print_sync(
     headless: bool | None = None,
     slow_mo_ms: int = 0,
     max_payments: int = 20,
+    progress_callback: Callable[[str, str, str | None], None] | None = None,
 ) -> ClickPostPaymentPrintResult:
     return asyncio.run(
         complete_clickpost_payments_and_print(
@@ -697,6 +706,7 @@ def complete_clickpost_payments_and_print_sync(
             headless=headless,
             slow_mo_ms=slow_mo_ms,
             max_payments=max_payments,
+            progress_callback=progress_callback,
         )
     )
 
@@ -1436,7 +1446,16 @@ class ClickPostClient:
         execute: bool,
         output_dir: Path,
         max_payments: int,
+        progress_callback: Callable[[str, str, str | None], None] | None = None,
     ) -> ClickPostPaymentPrintResult:
+        def progress(step: str, status: str, detail: str | None = None) -> None:
+            if progress_callback is None:
+                return
+            try:
+                progress_callback(step, status, detail)
+            except Exception:
+                pass
+
         output_dir.mkdir(parents=True, exist_ok=True)
         downloaded_pdf: Path | None = None
         warning_text: str | None = None
@@ -1455,12 +1474,15 @@ class ClickPostClient:
                 )
                 try:
                     page = await context.new_page()
+                    progress("login", "running", "クリックポストへログインしています。")
                     await self._login(page)
+                    progress("login", "completed", "ログイン完了")
                     await page.goto(CLICKPOST_MYPAGE_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
                     await page.wait_for_timeout(1500)
-                    remaining_payment_buttons = await _count_visible(
+                    initial_payment_buttons = await _count_visible(
                         page.locator('input.ywallet_button, input[name^="wallet_button["]')
                     )
+                    remaining_payment_buttons = initial_payment_buttons
 
                     if not execute:
                         await context.storage_state(path=str(CLICKPOST_STORAGE_STATE_PATH))
@@ -1478,29 +1500,73 @@ class ClickPostClient:
                         )
                         return result
 
+                    progress("payment", "running", f"支払い対象: {initial_payment_buttons}件")
+                    # マイページ再描画が遅いだけの「ボタンなし」を全件完了と誤判定しない
+                    # よう、開始時に見えていた件数に達するまでは1回だけ長めに再確認する
+                    # （2026-08-17 実障害と同型のレース対策）。
+                    extended_recheck_used = False
                     while payment_attempts < max_payments:
                         payment_button = await _first_visible_locator(
                             page.locator('input.ywallet_button, input[name^="wallet_button["]'),
-                            timeout=3000,
+                            timeout=PAYMENT_BUTTON_POLL_TIMEOUT_MS,
                         )
                         if payment_button is None:
-                            break
+                            if payments_completed >= initial_payment_buttons or extended_recheck_used:
+                                break
+                            extended_recheck_used = True
+                            progress(
+                                "payment",
+                                "running",
+                                f"支払いボタンの再表示を待っています（{payments_completed}件完了"
+                                f"／対象{initial_payment_buttons}件）。",
+                            )
+                            try:
+                                await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
+                            except Exception:
+                                pass
+                            payment_button = await _first_visible_locator(
+                                page.locator('input.ywallet_button, input[name^="wallet_button["]'),
+                                timeout=PAYMENT_BUTTON_RECHECK_TIMEOUT_MS,
+                            )
+                            if payment_button is None:
+                                break
+                        extended_recheck_used = False
                         payment_attempts += 1
+                        progress(
+                            "payment",
+                            "running",
+                            f"{payment_attempts}件目を決済しています（{payments_completed}件完了）。",
+                        )
                         await payment_button.click()
                         await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
                         await page.wait_for_timeout(1500)
                         await self._complete_wallet_payment(page)
                         payments_completed += 1
+                        progress(
+                            "payment",
+                            "running",
+                            f"{payments_completed}件完了（{payment_attempts}件試行）。",
+                        )
                         await page.goto(CLICKPOST_MYPAGE_URL, wait_until="domcontentloaded", timeout=nav_timeout_ms())
                         await page.wait_for_timeout(1500)
 
                     remaining_payment_buttons = await _count_visible(
                         page.locator('input.ywallet_button, input[name^="wallet_button["]')
                     )
+                    payment_detail = f"{payments_completed}/{payment_attempts}件完了"
+                    if remaining_payment_buttons:
+                        payment_detail += f" / 残り{remaining_payment_buttons}件"
+                    progress(
+                        "payment",
+                        "completed" if remaining_payment_buttons == 0 else "failed",
+                        payment_detail,
+                    )
                     if remaining_payment_buttons == 0:
+                        progress("print_pdf", "running", "まとめ印字PDFを保存しています。")
                         downloaded_pdf, print_target_rows = await self._download_multiple_print_pdf(page, output_dir)
+                        progress("print_pdf", "completed", f"{print_target_rows}件 / {downloaded_pdf}")
                     else:
-                        warning_text = f"未決済の支払いボタンが残っています: {remaining_payment_buttons}"
+                        warning_text = f"未決済の支払いボタンが残っています: {remaining_payment_buttons}件。"
 
                     await context.storage_state(path=str(CLICKPOST_STORAGE_STATE_PATH))
                 finally:
@@ -1517,7 +1583,11 @@ class ClickPostClient:
             downloaded_pdf=downloaded_pdf,
             download_dir=output_dir,
             audit_path=CLICKPOST_AUDIT_LOG_PATH,
-            skipped_reason=None if downloaded_pdf else "pdf_not_downloaded",
+            skipped_reason=(
+                "payments_remaining"
+                if remaining_payment_buttons
+                else (None if downloaded_pdf else "pdf_not_downloaded")
+            ),
             warning_text=warning_text,
         )
         _append_audit("payment_print", result)
@@ -1682,12 +1752,18 @@ class ClickPostClient:
                                 max_payments,
                                 # 1件ごとに進捗を更新する（events.jsonl に時刻が残り、件別の所要時間を検証できる）
                                 on_payment=lambda detail: progress("payment", "running", detail),
+                                expected_payments=target_rows,
                             )
                         )
                         payment_detail = f"{payments_completed}/{payment_attempts}件完了"
                         if remaining_payment_buttons:
                             payment_detail += f" / 残り{remaining_payment_buttons}件"
-                        progress("payment", "completed", payment_detail)
+                        # 残りがあるのに「完了」と表示すると気づけない（2026-08-17 実障害）。
+                        progress(
+                            "payment",
+                            "completed" if remaining_payment_buttons == 0 else "failed",
+                            payment_detail,
+                        )
                         if remaining_payment_buttons == 0:
                             progress("print_pdf", "running", "まとめ印字PDFを保存しています。")
                             downloaded_pdf, print_target_rows = await self._download_multiple_print_pdf(page, output_dir)
@@ -1708,7 +1784,10 @@ class ClickPostClient:
                             warning_text = _append_warning_text(warning_text, tracking_warnings)
                             progress("tracking_export", "completed", f"{tracking_rows}件 / {tracking_csv}")
                         else:
-                            warning_text = f"未決済の支払いボタンが残っています: {remaining_payment_buttons}"
+                            warning_text = (
+                                f"未決済の支払いボタンが残っています: {remaining_payment_buttons}件。"
+                                "クリックポスト画面の「支払い・印字のみ再開」で続きを実行できます。"
+                            )
                     else:
                         warning_text = await _page_text_excerpt(page)
                         progress("csv_import", "completed", "支払い画面を確認できませんでした。")
@@ -1854,6 +1933,8 @@ class ClickPostClient:
         page,
         max_payments: int,
         on_payment: Callable[[str], None] | None = None,
+        *,
+        expected_payments: int | None = None,
     ) -> tuple[int, int, int]:
         def notify(detail: str) -> None:
             if on_payment is None:
@@ -1865,10 +1946,15 @@ class ClickPostClient:
 
         payment_attempts = 0
         payments_completed = 0
+        # 2026-08-17 実障害: 決済後にウォレット(SBPS)からクリックポストへ戻る描画が
+        # 通常探索より遅いと「ボタンなし＝全件完了」と誤判定して途中終了する。
+        # expected_payments（インポート件数）に未達の間は、読み込み完了を待って
+        # 1回だけ長めに再探索してから打ち切りを判断する。
+        extended_recheck_used = False
         while payment_attempts < max_payments:
             payment_button = await _first_visible_locator(
                 page.locator('input.ywallet_button, input[name^="wallet_button["]'),
-                timeout=3000,
+                timeout=PAYMENT_BUTTON_POLL_TIMEOUT_MS,
             )
             if payment_button is None:
                 next_payment = await _first_visible_locator(
@@ -1880,15 +1966,36 @@ class ClickPostClient:
                         "button:has-text('次の支払い'), "
                         "button:has-text('お支払い手続き')"
                     ),
-                    timeout=1000,
+                    timeout=NEXT_PAYMENT_POLL_TIMEOUT_MS,
                 )
-                if next_payment is None:
+                if next_payment is not None:
+                    await next_payment.click()
+                    await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
+                    await page.wait_for_timeout(500)
+                    extended_recheck_used = False
+                    continue
+                expected_reached = (
+                    expected_payments is None or payments_completed >= expected_payments
+                )
+                if expected_reached or extended_recheck_used:
                     break
-                await next_payment.click()
-                await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
-                await page.wait_for_timeout(500)
-                continue
+                extended_recheck_used = True
+                notify(
+                    f"支払いボタンの再表示を待っています（{payments_completed}件完了"
+                    f"／対象{expected_payments}件）。"
+                )
+                try:
+                    await page.wait_for_load_state("domcontentloaded", timeout=nav_timeout_ms())
+                except Exception:
+                    pass
+                payment_button = await _first_visible_locator(
+                    page.locator('input.ywallet_button, input[name^="wallet_button["]'),
+                    timeout=PAYMENT_BUTTON_RECHECK_TIMEOUT_MS,
+                )
+                if payment_button is None:
+                    continue
 
+            extended_recheck_used = False
             payment_attempts += 1
             notify(f"{payment_attempts}件目を決済しています（{payments_completed}件完了）。")
             await payment_button.click()

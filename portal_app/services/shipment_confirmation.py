@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 import json
 import os
 import re
@@ -47,6 +48,8 @@ FLOW_ID = "e020c90f-c86d-4be9-ace7-e38751e80d2f"
 FLOW_NAME = "NE出荷確定"
 AUDIT_LOG_DIR = APP_ROOT / "logs" / "shipment_confirmation"
 AUDIT_LOG_PATH = AUDIT_LOG_DIR / "shipment_confirmation_audit.jsonl"
+# 実反映に成功したCSVの内容ハッシュ履歴。前日分・反映済みCSVの再送ガードが参照する。
+UPLOADED_CSV_HISTORY_PATH = AUDIT_LOG_DIR / "uploaded_csv_history.jsonl"
 NEXT_ENGINE_SHIPMENT_UPLOAD_URL = "https://main.next-engine.com/Userlogine"
 SHIPMENT_COMPLETION_DIR_PARTS = ("ネクストエンジン", "完成データ")
 YAMATO_TRACKING_DIR_PARTS = ("ネクストエンジン", "yamato-okurizyo")
@@ -384,6 +387,7 @@ async def upload_next_engine_shipment_csv(
     execute: bool,
     upload_csv: Path | None = None,
     confirm_upload: bool = False,
+    allow_old_csv: bool = False,
     headless: bool | None = None,
     slow_mo_ms: int = 0,
     preview_limit: int = 20,
@@ -445,6 +449,25 @@ async def upload_next_engine_shipment_csv(
                     f"（{newer.name}）があります。「アップロード前チェック」を"
                     "やり直してから反映してください。",
                 ),
+                audit_path=AUDIT_LOG_PATH,
+            )
+            _append_audit_payload("shipment_upload", result)
+            return result
+
+    # 2026-08-18 実障害: 当日のCSV作成前に「反映」を実行すると、候補（＝最新の有効CSV）
+    # が前日分のままNEへ再送される。上の stale_csv_selected は「チェック後に新しい
+    # CSVができた」ケース専用で、「古いCSVしか存在しない」ケースは素通りしていた。
+    # 実反映は「きょう作成された・未反映のCSV」だけを許可し、日跨ぎ等の例外運用は
+    # allow_old_csv（画面のチェックボックス / CLI --allow-old-csv）で明示させる。
+    if not allow_old_csv:
+        blocked = _upload_block_reason(preview.upload_csv)
+        if blocked is not None:
+            reason, warning = blocked
+            result = _replace_upload_result(
+                preview,
+                executed=False,
+                skipped_reason=reason,
+                warnings=(*preview.warnings, warning),
                 audit_path=AUDIT_LOG_PATH,
             )
             _append_audit_payload("shipment_upload", result)
@@ -565,6 +588,8 @@ async def upload_next_engine_shipment_csv(
         warnings=(*preview.warnings, *extra_warnings),
         audit_path=AUDIT_LOG_PATH,
     )
+    # 反映成功したCSVの内容ハッシュを履歴に残す（次回以降の duplicate_upload 判定用）。
+    _record_uploaded_csv(preview.upload_csv, rows=preview.source_rows)
     _append_audit_payload("shipment_upload", result)
     return result
 
@@ -574,6 +599,7 @@ def upload_next_engine_shipment_csv_sync(
     execute: bool,
     upload_csv: Path | None = None,
     confirm_upload: bool = False,
+    allow_old_csv: bool = False,
     headless: bool | None = None,
     slow_mo_ms: int = 0,
     preview_limit: int = 20,
@@ -584,6 +610,7 @@ def upload_next_engine_shipment_csv_sync(
             execute=execute,
             upload_csv=upload_csv,
             confirm_upload=confirm_upload,
+            allow_old_csv=allow_old_csv,
             headless=headless,
             slow_mo_ms=slow_mo_ms,
             preview_limit=preview_limit,
@@ -1375,6 +1402,112 @@ def _newer_candidate_than(source: Path | None) -> Path | None:
     except OSError:
         return None
     return None
+
+
+def _upload_block_reason(upload_csv: Path) -> tuple[str, str] | None:
+    """実反映を止めるべき候補CSVなら (skipped_reason, 警告文) を返す。
+
+    判定は2段: (1) きょう作成されたCSVか（前日分CSVの再送防止・2026-08-18 実障害）、
+    (2) 内容ハッシュが反映成功履歴に無いか（同一CSVの二重反映防止）。
+    stat・読み込みに失敗した場合はブロックしない（従来動作のまま）。
+    """
+    if _csv_created_today(upload_csv) is False:
+        return (
+            "csv_not_created_today",
+            f"反映候補CSV（{Path(upload_csv).name}）は本日作成ではありません"
+            f"（作成: {_mtime_text(upload_csv)}）。先に「出荷確定CSV作成」を実行してください。"
+            "日跨ぎ等で意図して反映する場合は「前日以前・反映済みのCSVと理解して反映する」"
+            "（CLI: --allow-old-csv）を指定してください。",
+        )
+    sha256 = _sha256_of_file(upload_csv)
+    entry = _uploaded_csv_history_entry(sha256) if sha256 else None
+    if entry is not None:
+        return (
+            "duplicate_upload",
+            f"反映候補CSV（{Path(upload_csv).name}）と同じ内容のCSVは"
+            f" {entry.get('uploaded_at', '不明な日時')} に反映済みです"
+            f"（ファイル: {entry.get('name', '不明')}）。再反映する場合は"
+            "「前日以前・反映済みのCSVと理解して反映する」（CLI: --allow-old-csv）を"
+            "指定してください。",
+        )
+    return None
+
+
+def describe_upload_csv_freshness(upload_csv: Path | None) -> dict[str, object]:
+    """アップロード前チェック画面用の鮮度情報（読み取りのみ・状態変更なし）。"""
+    if upload_csv is None or not Path(upload_csv).is_file():
+        return {"created_today": None, "already_uploaded_at": None}
+    sha256 = _sha256_of_file(upload_csv)
+    entry = _uploaded_csv_history_entry(sha256) if sha256 else None
+    return {
+        "created_today": _csv_created_today(upload_csv),
+        "already_uploaded_at": entry.get("uploaded_at") if entry else None,
+    }
+
+
+def _csv_created_today(path: Path) -> bool | None:
+    """最終更新がきょうなら True。stat 失敗時は None（判定不能＝ブロックしない）。"""
+    try:
+        return date.fromtimestamp(Path(path).stat().st_mtime) == date.today()
+    except OSError:
+        return None
+
+
+def _mtime_text(path: Path) -> str:
+    try:
+        return datetime.fromtimestamp(Path(path).stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+    except OSError:
+        return "不明"
+
+
+def _sha256_of_file(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _uploaded_csv_history_entry(sha256: str) -> dict[str, object] | None:
+    """反映成功履歴から同一内容（sha256一致）の最新エントリを返す。"""
+    try:
+        if not UPLOADED_CSV_HISTORY_PATH.is_file():
+            return None
+        found: dict[str, object] | None = None
+        with UPLOADED_CSV_HISTORY_PATH.open(encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(entry, dict) and entry.get("sha256") == sha256:
+                    found = entry
+        return found
+    except OSError:
+        return None
+
+
+def _record_uploaded_csv(path: Path | None, *, rows: int) -> None:
+    """実反映に成功したCSVを履歴へ追記する（履歴書込の失敗は反映結果に影響させない）。"""
+    if path is None:
+        return
+    sha256 = _sha256_of_file(path)
+    if sha256 is None:
+        return
+    try:
+        UPLOADED_CSV_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "uploaded_at": datetime.now().isoformat(timespec="seconds"),
+            "name": Path(path).name,
+            "sha256": sha256,
+            "rows": rows,
+        }
+        with UPLOADED_CSV_HISTORY_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
 
 
 def _latest_completion_csv(warnings: list[str]) -> Path | None:

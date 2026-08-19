@@ -52,6 +52,7 @@ from portal_app.services.billing_statements import (
     resolve_artifact_path as resolve_billing_artifact_path,
 )
 from portal_app.services.clickpost import (
+    complete_clickpost_payments_and_print_sync,
     create_clickpost_csv,
     find_clickpost_paths,
     import_pay_print_clickpost_csv_sync,
@@ -92,6 +93,7 @@ from portal_app.settings import (
 from portal_app.services.shipment_confirmation import (
     confirm_next_engine_shipment_sync,
     create_shipment_slip_import_csv,
+    describe_upload_csv_freshness,
     download_yamato_tracking_export_sync,
     preview_next_engine_shipment_upload,
     preview_shipment_slip_import,
@@ -456,6 +458,20 @@ def _clickpost_import_payment_print_summary(result) -> dict[str, object]:
         "tracking_rows": getattr(result, "tracking_rows", 0),
         "workbook_path": _path_text(getattr(result, "workbook_path", None)),
         "workbook_updated": getattr(result, "workbook_updated", False),
+        "download_dir": _path_text(getattr(result, "download_dir", None)),
+        "skipped_reason": getattr(result, "skipped_reason", None),
+        "warning_text": getattr(result, "warning_text", None),
+    }
+
+
+def _clickpost_payment_print_summary(result) -> dict[str, object]:
+    return {
+        "executed": getattr(result, "executed", False),
+        "payment_attempts": getattr(result, "payment_attempts", 0),
+        "payments_completed": getattr(result, "payments_completed", 0),
+        "remaining_payment_buttons": getattr(result, "remaining_payment_buttons", 0),
+        "print_target_rows": getattr(result, "print_target_rows", 0),
+        "downloaded_pdf": _path_text(getattr(result, "downloaded_pdf", None)),
         "download_dir": _path_text(getattr(result, "download_dir", None)),
         "skipped_reason": getattr(result, "skipped_reason", None),
         "warning_text": getattr(result, "warning_text", None),
@@ -1429,15 +1445,30 @@ async def shipment_confirmation_upload_check(request: Request):
     shipping_dates = sorted(
         {row.get("出荷予定日", "") for row in result.preview_rows if row.get("出荷予定日")}
     )
+    # 当日CSVガード（2026-08-18 実障害対策）の判定材料をチェック時点でも見せる。
+    freshness = describe_upload_csv_freshness(result.upload_csv)
+    warnings = list(result.warnings)
+    if freshness["created_today"] is False:
+        warnings.append(
+            f"このCSVは本日作成ではありません（更新: {updated_at or '不明'}）。"
+            "先に「出荷確定CSV作成」を実行してください。このまま反映しようとすると自動で停止します。"
+        )
+    if freshness["already_uploaded_at"]:
+        warnings.append(
+            f"このCSVと同じ内容は {freshness['already_uploaded_at']} にネクストエンジンへ反映済みです。"
+            "このまま反映しようとすると自動で停止します。"
+        )
     return {
         "ready_to_upload": result.ready_to_upload,
         "upload_csv": _path_text(result.upload_csv),
         "updated_at": updated_at,
+        "created_today": freshness["created_today"],
+        "already_uploaded_at": freshness["already_uploaded_at"],
         "source_rows": result.source_rows,
         "source_headers": list(result.source_headers),
         "shipping_dates": shipping_dates,
         "errors": list(result.errors),
-        "warnings": list(result.warnings),
+        "warnings": warnings,
         "preview_rows": [dict(row) for row in result.preview_rows],
     }
 
@@ -1455,6 +1486,7 @@ async def shipment_confirmation_upload_start(request: Request):
             status_code=400,
         )
     csv_file = form.get("csv_file", "").strip()
+    allow_old_csv = _form_bool(form, "allow_old_csv")
     headed = _form_headed(form)
     slow_mo_ms = _form_int(form, "slow_mo_ms", 150 if headed else 0)
     preview_limit = max(1, min(_form_int(form, "preview_limit", 30), 100))
@@ -1478,6 +1510,7 @@ async def shipment_confirmation_upload_start(request: Request):
         result = upload_next_engine_shipment_csv_sync(
             execute=execute,
             confirm_upload=confirm_upload,
+            allow_old_csv=allow_old_csv,
             upload_csv=Path(csv_file) if csv_file else None,
             headless=not headed,
             slow_mo_ms=slow_mo_ms,
@@ -1511,6 +1544,11 @@ async def shipment_confirmation_upload_start(request: Request):
                     "upload_csv_not_ready": "候補CSVが反映可能な状態でない",
                     "stale_csv_selected": "チェック後に新しいCSVが作成されたため送信を中止しました。"
                     "「アップロード前チェック」をやり直してから反映してください",
+                    "csv_not_created_today": "候補CSVが本日作成ではないため送信を中止しました。"
+                    "先に「出荷確定CSV作成」を実行してください（日跨ぎ等は"
+                    "「前日以前・反映済みのCSVと理解して反映する」にチェック）",
+                    "duplicate_upload": "同じ内容のCSVが反映済みのため送信を中止しました。"
+                    "再反映する場合は「前日以前・反映済みのCSVと理解して反映する」にチェックしてください",
                 }.get(result.skipped_reason or "", result.skipped_reason or "理由不明")
                 warning_tail = (
                     " " + " / ".join(list(result.warnings)[-2:]) if result.warnings else ""
@@ -1542,7 +1580,12 @@ async def shipment_confirmation_upload_start(request: Request):
         steps=steps,
         worker=worker,
         workflow="shipment_confirmation_upload",
-        metadata={"execute": execute, "confirm_upload": confirm_upload, "headed": headed},
+        metadata={
+            "execute": execute,
+            "confirm_upload": confirm_upload,
+            "allow_old_csv": allow_old_csv,
+            "headed": headed,
+        },
     )
     return {"job_id": job_id}
 
@@ -1847,6 +1890,16 @@ async def clickpost_import_payment_print_start(request: Request):
             max_payments=max_payments,
             progress_callback=update_progress,
         )
+        # 2026-08-17 実障害: 未決済が残っているのに「完了」表示になり気づけなかった。
+        # 残りがある場合はジョブを失敗として明示し、再開手順を案内する。
+        if result.executed and result.remaining_payment_buttons > 0:
+            progress_jobs.fail(
+                job_id,
+                f"決済が完了していません（{result.payments_completed}件完了・"
+                f"残り{result.remaining_payment_buttons}件）。宛名印字も未実行です。"
+                "「支払い・印字のみ再開」で続きを実行してください。",
+            )
+            return
         message = (
             "クリックポスト取込・決済・送り状番号取得が完了しました。"
             if result.executed and not result.skipped_reason
@@ -1870,6 +1923,75 @@ async def clickpost_import_payment_print_start(request: Request):
         ],
         worker=worker,
         workflow="clickpost_import_payment_print",
+        metadata={
+            "browser_mode": browser_mode,
+            "headed": headed,
+            "slow_mo_ms": slow_mo_ms,
+            "max_payments": max_payments,
+            "execute": True,
+        },
+    )
+    return {"job_id": job_id}
+
+
+@app.post("/clickpost/payment-print/start")
+async def clickpost_payment_print_start(request: Request):
+    # 決済が途中で止まった（残り件数あり）ときの再開用。CSVの再インポートはせず、
+    # マイページに残っている支払いの決済と、まとめ印字PDFの保存だけを行う。
+    # （2026-08-17 実障害: 二重実行ガードで再取込が止まり、続きを実行する導線がなかった）
+    form = await _read_form(request)
+    if not _form_bool(form, "confirm_execute"):
+        return PlainTextResponse("実行確認にチェックしてください。", status_code=400)
+
+    browser_mode = form.get("browser_mode", "front")
+    if browser_mode not in {"background", "front"}:
+        browser_mode = "front"
+    headed = browser_mode == "front"
+    slow_mo_ms = _form_int(form, "slow_mo_ms", 150 if headed else 0)
+    if not headed:
+        slow_mo_ms = 0
+    max_payments = max(1, min(_form_int(form, "max_payments", 20), 100))
+
+    def worker(job_id: str) -> None:
+        def update_progress(step: str, status: str, detail: str | None = None) -> None:
+            progress_jobs.update_step(job_id, step, status=status, detail=detail)
+
+        result = complete_clickpost_payments_and_print_sync(
+            execute=True,
+            headless=not headed,
+            slow_mo_ms=slow_mo_ms,
+            max_payments=max_payments,
+            progress_callback=update_progress,
+        )
+        if result.executed and result.remaining_payment_buttons > 0:
+            progress_jobs.fail(
+                job_id,
+                f"決済が完了していません（{result.payments_completed}件完了・"
+                f"残り{result.remaining_payment_buttons}件）。"
+                "もう一度「支払い・印字のみ再開」を実行するか、"
+                "クリックポストのマイページを直接確認してください。",
+            )
+            return
+        message = (
+            "支払い・印字の再開が完了しました。"
+            if result.executed and not result.skipped_reason
+            else "支払い・印字の再開を終了しました。結果を確認してください。"
+        )
+        progress_jobs.finish(
+            job_id,
+            message=message,
+            result={"payment_print": _clickpost_payment_print_summary(result)},
+        )
+
+    job_id = progress_jobs.start(
+        title="クリックポスト 支払い・印字のみ再開",
+        steps=[
+            ("login", "クリックポストログイン"),
+            ("payment", "決済"),
+            ("print_pdf", "まとめ印字PDF保存"),
+        ],
+        worker=worker,
+        workflow="clickpost_payment_print",
         metadata={
             "browser_mode": browser_mode,
             "headed": headed,
@@ -1948,6 +2070,15 @@ async def clickpost_full_run_start(request: Request):
             allow_duplicate_csv=restore_ne_status,
             progress_callback=update_progress,
         )
+        # 2026-08-17 実障害: 決済が6/13件で止まったのに「完了」表示になり気づけなかった。
+        if import_result.executed and import_result.remaining_payment_buttons > 0:
+            progress_jobs.fail(
+                job_id,
+                f"クリックポストの決済が完了していません（{import_result.payments_completed}件完了・"
+                f"残り{import_result.remaining_payment_buttons}件）。宛名印字も未実行です。"
+                "「支払い・印字のみ再開」で続きを実行してください（NE取得・レターパックPDFは作成済み）。",
+            )
+            return
         message = (
             "NE取得、納品書PDF取得、レターパックPDF作成、クリックポスト本番処理が完了しました。"
             if import_result.executed and not import_result.skipped_reason

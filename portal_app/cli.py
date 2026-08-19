@@ -209,6 +209,7 @@ def upload_next_engine_shipment_confirmation(
     *,
     execute: bool,
     confirm_upload: bool,
+    allow_old_csv: bool,
     csv_file: str | None,
     headed: bool,
     slow_mo_ms: int,
@@ -217,6 +218,7 @@ def upload_next_engine_shipment_confirmation(
     result = upload_next_engine_shipment_csv_sync(
         execute=execute,
         confirm_upload=confirm_upload,
+        allow_old_csv=allow_old_csv,
         upload_csv=Path(csv_file) if csv_file else None,
         headless=not headed,
         slow_mo_ms=slow_mo_ms,
@@ -1706,6 +1708,11 @@ def main() -> int:
         help="アップロードする出荷実績CSV（3列: 伝票番号,発送伝票番号,出荷予定日）を指定します。未指定時は 完成データ の最新 yamato_to-ne*.csv です。",
     )
     shipment_upload_parser.add_argument(
+        "--allow-old-csv",
+        action="store_true",
+        help="本日作成でないCSV・反映済みと同一内容のCSVでも反映します（日跨ぎ等の例外運用向け。通常は不要）。",
+    )
+    shipment_upload_parser.add_argument(
         "--headed",
         action="store_true",
         help="ブラウザを表示して実行します。",
@@ -2565,6 +2572,7 @@ def _dispatch(args: argparse.Namespace) -> int:
         return upload_next_engine_shipment_confirmation(
             execute=args.execute,
             confirm_upload=args.confirm_upload,
+            allow_old_csv=args.allow_old_csv,
             csv_file=args.csv_file,
             headed=args.headed,
             slow_mo_ms=args.slow_mo_ms,
