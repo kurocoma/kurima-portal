@@ -38,6 +38,7 @@ from portal_app.services.next_engine_order_status import (
     OrderStatusBatchRestoreResult,
     restore_next_engine_print_wait_batch_sync,
 )
+from portal_app.services.page_diagnostics import capture_page_diagnostics
 from portal_app.services.paths import PortalPaths, find_portal_paths
 from portal_app.settings import download_timeout_ms, nav_timeout_ms
 
@@ -57,6 +58,8 @@ INVOICE_DOWNLOAD_BUTTON_ID = "#btn_nouhinsho_dl_exec"
 CLICKPOST_STORAGE_STATE_PATH = APP_ROOT / "data" / "storage" / "clickpost.json"
 CLICKPOST_AUDIT_LOG_DIR = APP_ROOT / "logs" / "clickpost"
 CLICKPOST_AUDIT_LOG_PATH = CLICKPOST_AUDIT_LOG_DIR / "clickpost_audit.jsonl"
+# ログイン後にマイページへ着かないとき、この時間だけ待ってから画面を共有ログへ記録する。
+LOGIN_WAIT_SNAPSHOT_AFTER_MS = 20000
 # 決済ループのボタン出現待ち。2026-08-17 実障害: ウォレット(SBPS)からの復帰描画が
 # 通常探索（3秒+1秒）より遅く、「ボタンなし＝全件完了」と誤判定して13件中7件が
 # 未決済のまま正常終了した。期待件数に未達の間は RECHECK の長い待ちで1回再確認する。
@@ -2426,7 +2429,17 @@ class ClickPostClient:
                     await page.wait_for_timeout(2500)
 
         login_timeout = 600000 if not self.headless else 15000
-        if not await _page_contains(page, "マイページ", timeout=login_timeout):
+        # 前面実行は人の操作を最大10分待つ。待ちに入った時点の画面を共有ログへ残す
+        # （2026-10-01: 規約同意画面で止まったまま閉じられ、何の画面か記録が無かった）。
+        reached = await _page_contains(
+            page, "マイページ", timeout=min(login_timeout, LOGIN_WAIT_SNAPSHOT_AFTER_MS)
+        )
+        if not reached and login_timeout > LOGIN_WAIT_SNAPSHOT_AFTER_MS:
+            await capture_page_diagnostics(page, workflow="clickpost", label="login_waiting")
+            reached = await _page_contains(
+                page, "マイページ", timeout=login_timeout - LOGIN_WAIT_SNAPSHOT_AFTER_MS
+            )
+        if not reached:
             screenshot, html = await _save_clickpost_debug_artifacts(page, "clickpost_login_failed")
             title = await _safe_page_title(page)
             excerpt = await _safe_page_excerpt(page)

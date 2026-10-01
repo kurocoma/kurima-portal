@@ -36,6 +36,10 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 
 from portal_app.services.execution_logger import APP_ROOT
+from portal_app.services.page_diagnostics import (
+    capture_page_diagnostics,
+    format_diagnostics,
+)
 from portal_app.services.paths import find_billing_statements_paths
 
 
@@ -120,6 +124,10 @@ _PROFILE_ENV = "KURIMA_BILLPAY_CHROME_PROFILE"
 _AUDIT_PATH = APP_ROOT / "logs" / "billing_statements" / "billpay_settlements.jsonl"
 _SESSION_SAFE_SECONDS = 25 * 60
 _MAX_PAGES = 50
+# 精算回の展開待ち（_ensure_settlement_expanded）。自動展開は描画後0.2〜0.4秒で起きる。
+_EXPAND_WAIT_MS = 3_000
+_EXPAND_SETTLE_SECONDS = 1.0
+_EXPAND_MAX_CLICKS = 4
 
 # 自動ログイン（今回ユーザーが明示許可。Obsidianノートの既存方針「初回・期限切れ時の
 # ログインは人が手動で行う」から本フローに限り意図的に逸脱する。task.md 2026-07-12
@@ -990,6 +998,39 @@ def _assert_session_safe(started: float) -> None:
         )
 
 
+async def _ensure_settlement_expanded(target_button, collapse) -> None:
+    """対象精算回を展開し、目的のdocument buttonが見えたままになるのを確認する。
+
+    最新の精算回は描画の0.2〜0.4秒後にページ側が自動で展開する。展開ボタンは
+    トグルなので、描画直後に「非表示」と判定してクリックすると自動展開と打ち消し
+    合って閉じたままになる（2026-10-01 実障害・翌日に実画面で再現）。
+    そのため ①クリック前に自動展開を短時間待つ ②表示後も少し置いて閉じ直されて
+    いないか確かめる ③閉じていたら押し直す、の順で進める。
+    """
+
+    if await target_button.count() == 0 or await collapse.count() == 0:
+        return
+    clicks = 0
+    while True:
+        try:
+            await target_button.first.wait_for(
+                state="visible", timeout=_EXPAND_WAIT_MS
+            )
+        except PlaywrightTimeoutError:
+            pass
+        else:
+            await asyncio.sleep(_EXPAND_SETTLE_SECONDS)
+            if await target_button.first.is_visible():
+                return
+        if clicks >= _EXPAND_MAX_CLICKS:
+            raise BillPayError(
+                "BillPay精算回の展開完了を確認できません。",
+                state="PAGE_CONTRACT_CHANGED",
+            )
+        await collapse.first.click()
+        clicks += 1
+
+
 async def _document_button(tbody, document_type: str):
     # document-typeは必ず対象visible tbody内へscopeし、page全体の先頭を選ばない。
     button = tbody.locator(f'button[document-type="{document_type}"]')
@@ -1527,6 +1568,8 @@ async def download_billpay_settlement(
                 locale="ja-JP",
                 slow_mo=max(0, int(slow_mo_ms)),
             )
+            page = None
+            current_target: _SettlementRef | None = None
             try:
                 page = context.pages[0] if context.pages else await context.new_page()
                 await page.goto(_SCREEN_URLS[screen], wait_until="domcontentloaded")
@@ -1572,6 +1615,7 @@ async def download_billpay_settlement(
                         )
                     )
                 for target in ([] if document_type == "summary" else targets):
+                    current_target = target
                     _assert_session_safe(started)
                     await _goto_page_index(
                         page,
@@ -1589,21 +1633,7 @@ async def download_billpay_settlement(
                         f'button[document-type="{document_type}"]'
                     )
                     collapse = tbody.locator("button.rms-collapse-btn")
-                    if (
-                        await target_button.count() > 0
-                        and not await target_button.first.is_visible()
-                        and await collapse.count() > 0
-                    ):
-                        await collapse.first.click()
-                        try:
-                            await target_button.first.wait_for(
-                                state="visible", timeout=30_000
-                            )
-                        except PlaywrightTimeoutError:
-                            raise BillPayError(
-                                "BillPay精算回の展開完了を確認できません。",
-                                state="PAGE_CONTRACT_CHANGED",
-                            ) from None
+                    await _ensure_settlement_expanded(target_button, collapse)
                     button = await _document_button(tbody, document_type)
                     if button is None:
                         warnings.append(
@@ -1624,6 +1654,21 @@ async def download_billpay_settlement(
                             batch_id=batch_id,
                         )
                     )
+            except Exception as exc:
+                # 失敗した瞬間の画面を共有ログフォルダへ残し、エラーログのtracebackにも
+                # 状況を添える（2026-10-01 の展開失敗は画面が残らず原因特定に手間取った）。
+                diagnostics = await capture_page_diagnostics(
+                    page, workflow="billing_statements_rakuten", label=f"{screen}_failed"
+                )
+                exc.add_note(
+                    "BillPay診断:"
+                    f" state={getattr(exc, 'state', None)} screen={screen} scope={scope}"
+                    f" document_type={document_type}"
+                    f" target_issue_date={current_target.issue_date if current_target else None}"
+                    f" elapsed={time.monotonic() - started:.0f}s"
+                    f" {format_diagnostics(diagnostics)}"
+                )
+                raise
             finally:
                 await context.close()
 

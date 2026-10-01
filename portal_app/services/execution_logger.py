@@ -36,11 +36,16 @@ def json_safe(value: Any) -> Any:
 
 
 def exception_payload(exc: BaseException) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "type": exc.__class__.__name__,
         "message": str(exc),
         "traceback": traceback.format_exc(),
     }
+    # BillPayError などが持つ分類コード（NEEDS_LOGIN / PAGE_CONTRACT_CHANGED 等）。
+    state = getattr(exc, "state", None)
+    if state:
+        payload["state"] = str(state)
+    return payload
 
 
 class ExecutionLogger:
@@ -142,6 +147,11 @@ def _mirror_to_portal_log(payload: dict[str, Any]) -> None:
             parts.append(f"step={payload['step']}")
         if payload.get("detail"):
             parts.append(f"detail={payload['detail']}")
+        # ジョブの指定内容（対象画面・取得範囲など）。共有ログだけで「何を実行したか」が
+        # 分かるようにする（秘匿キーは json_safe でマスク済み）。
+        metadata = (payload.get("data") or {}).get("metadata")
+        if payload.get("event") == "job_created" and metadata:
+            parts.append(f"metadata={json.dumps(metadata, ensure_ascii=False)}")
         message = " ".join(parts)
         if payload.get("level") == "error":
             data = payload.get("data") or {}
