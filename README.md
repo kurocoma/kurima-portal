@@ -12,6 +12,7 @@ Playwright で Next Engine / ヤマトB2 / クリックポストを自動操作�
 - **ヤマト伝票** — 受注データ取得、住所補正、B2取込用CSV作成、ヤマトB2への取込
 - **クリックポスト** — 申込データ作成、レターパック宛名PDF、取込・決済・送り状番号取得
 - **クーポン明細取得** — 楽天RMSの受注データ（出力テンプレート「クーポン」）から前月分CSVを取得し、`入金明細/クーポン/csv/{YYMM}_coupon.csv` へ保存。あわせて集計ブック「{N}月クーポン利用 .xlsm」をテンプレートから複製
+- **Shopifyカレンダー** — ストア（shop.kurima.co.jp）の営業日カレンダー画像（今月・来月）を作成し、Shopify の固定名ファイル `calendar_current.jpg` / `calendar_next.jpg` を差し替えて反映。土日・祝日は自動、お盆・年末年始などの臨時休業日だけ入力
 - **実行履歴**（`/jobs`）— バックグラウンドジョブの完了/失敗履歴。`logs/jobs/history.jsonl` に永続化され、再起動後も残る
 - **ログ一覧**（`/logs`）— `logs/` 配下のエラー・デバッグ出力に加え、共有ログ（SharePoint 側の実行ログ・エラーログ）も画面から一覧・閲覧
 - **設定**（`/settings`）— .env の設定状況（秘密はマスク）とパス解決・ログ出力先・タイムアウト実効値の見える化（閲覧のみ）
@@ -262,6 +263,31 @@ uv run python scripts/verify_coupon_template.py
 テンプレート修正前の原本は `data/coupon_statements/template_backup/` に退避しています
 （`--backup-dir` を付けると検査対象に含められます）。
 
+### Shopifyカレンダー
+
+| キー | 用途 |
+|---|---|
+| `SHOPIFY_CLIENT_ID` / `SHOPIFY_CLIENT_SECRET` | Dev Dashboard の自社ストア用アプリ（product-register と同じアプリ）。Client Credentials Grant でトークンを取得。必要スコープ `write_files`（反映）、任意で `read_themes`（テーマ参照の確認） |
+| `SHOPIFY_SHOP` | ストアID（既定 `kurima-okinawa`） |
+| `KURIMA_SHOPIFY_CALENDAR_DIR` | 生成画像と `臨時休業日.json` の保存先（既定 ポータル同期フォルダ/`Shopifyカレンダー`） |
+| `KURIMA_SHOPIFY_STOREFRONT_URL` | 反映後の表示確認で開くストアURL（既定 `https://shop.kurima.co.jp/`） |
+
+運用:
+
+1. `/shopify-calendar` で今月・来月の臨時休業日を入力 →「プレビューを作成」（画像と入力値は同期フォルダに保存）
+2. プレビューを確認して「この内容で Shopify へ反映」→ 2ファイルを同名で差し替え、公開完了まで待って確認
+3. **月が変わったら（毎月1日〜数日のうちに）1・2を行う**。今月=calendar_current、来月=calendar_next が入れ替わる
+
+テーマには書き込みません。初回だけ、テーマエディタで次の4か所の画像を固定名ファイルに付け替えます
+（画面の「初回設定」にも同じ手順あり）。
+
+| 場所 | 表示 | 画像 |
+|---|---|---|
+| サイドバー「営業日カレンダー」ブロック1 | PC | `calendar_current.jpg` |
+| サイドバー カレンダーブロック2（休業日の案内文つき） | PC | `calendar_next.jpg` |
+| トップページ「営業日カレンダー」セクション 画像1（幅100%） | SPのみ（767px以上は非表示） | `calendar_current.jpg` |
+| 同 画像2（幅100%） | SPのみ | `calendar_next.jpg` |
+
 ### ブラウザ実体（Playwright）
 
 | キー | 用途 |
@@ -281,6 +307,7 @@ uv run python scripts/verify_coupon_template.py
 | `/yamato` | ヤマト伝票。NE取得〜B2取込CSV作成〜B2取込 |
 | `/clickpost` | クリックポスト。CSV作成〜取込・決済・送り状取得 |
 | `/coupon` | クーポン明細取得。前月分（注文日 月初00:00:00〜月末23:59:59）のクーポン明細CSV取得と集計ブックの複製。既存の同月ブックは上書きしない |
+| `/shopify-calendar` | Shopifyカレンダー。臨時休業日の入力・プレビュー・Shopify への反映、Shopify 上のファイルとテーマ参照の状態表示 |
 | `/jobs` | 実行履歴。日時・種別・結果・所要時間・エラー概要を新しい順に表示。実行中の件数はナビのバッジに常時表示 |
 | `/logs` | ログ一覧。`logs/` 配下と共有ログ（SharePoint 側、「共有」ラベル）を新しい順に一覧し、テキストログを画面で閲覧 |
 | `/settings` | 設定の見える化（閲覧のみ）。環境変数の設定状況（PASSWORD 等は先頭2文字＋***でマスク）、パス解決結果、ログ出力先、タイムアウト実効値、稼働バージョン |

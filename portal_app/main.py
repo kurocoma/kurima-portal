@@ -3,6 +3,7 @@
 import csv
 import io
 import json
+import re
 import subprocess
 import sys
 import zipfile
@@ -64,6 +65,14 @@ from portal_app.services.coupon_statements import (
     download_coupon_statements_sync,
     read_coupon_preview,
     resolve_coupon_csv_path,
+)
+from portal_app.services import shopify_calendar
+from portal_app.services.calendar_image import (
+    CLOSED_DAYS_REMINDER,
+    ClosedDaysError,
+    current_and_next,
+    holidays_in,
+    parse_closed_days,
 )
 from portal_app.services.inventory import analyze_latest_inventory, result_to_csv
 from portal_app.services.inventory_pdf import inventory_result_to_pdf, takaesu_order_sheet_to_pdf
@@ -3801,6 +3810,187 @@ def coupon_download_csv():
     if path is None:
         return PlainTextResponse("保存済みのクーポン明細CSVがありません。", status_code=404)
     return FileResponse(path, filename=path.name)
+
+
+def _shopify_calendar_months(form: dict[str, str] | None = None):
+    """今月・来月の入力欄の表示データ。form があればその入力値、無ければ保存済みの値を入れる。"""
+    saved = shopify_calendar.load_closed_days()
+    folder = shopify_calendar.calendar_dir()
+    months = []
+    for target, filename in zip(
+        current_and_next(date.today()),
+        (shopify_calendar.CURRENT_FILENAME, shopify_calendar.NEXT_FILENAME),
+    ):
+        image = shopify_calendar.image_path(target, folder)
+        months.append(
+            {
+                "key": target.key,
+                "label": target.label,
+                "filename": filename,
+                "closed": (form or {}).get(f"closed_{target.key}", saved.get(target.key, "")),
+                "saved_closed": saved.get(target.key, ""),
+                "holidays": holidays_in(target),
+                "reminder": CLOSED_DAYS_REMINDER.get(target.month),
+                "image_exists": image.is_file(),
+                "image_version": int(image.stat().st_mtime) if image.is_file() else 0,
+                "image_updated": (
+                    datetime.fromtimestamp(image.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+                    if image.is_file()
+                    else None
+                ),
+            }
+        )
+    return months
+
+
+def _shopify_calendar_closed(form: dict[str, str]) -> dict[str, tuple[int, ...]]:
+    """フォームの closed_YYYY_MM を今月・来月について読み取る（不正なら ClosedDaysError）。"""
+    return {
+        target.key: parse_closed_days(form.get(f"closed_{target.key}", ""), target)
+        for target in current_and_next(date.today())
+    }
+
+
+def _shopify_calendar_page(
+    request: Request,
+    *,
+    form: dict[str, str] | None = None,
+    error: str | None = None,
+    notice: str | None = None,
+    status_code: int = 200,
+) -> HTMLResponse:
+    return templates.TemplateResponse(
+        "shopify_calendar.html",
+        {
+            "request": request,
+            "months": _shopify_calendar_months(form),
+            "folder": shopify_calendar.calendar_dir(),
+            "current_filename": shopify_calendar.CURRENT_FILENAME,
+            "next_filename": shopify_calendar.NEXT_FILENAME,
+            "error": error,
+            "notice": notice,
+        },
+        status_code=status_code,
+    )
+
+
+@app.get("/shopify-calendar", response_class=HTMLResponse)
+def shopify_calendar_page(request: Request, generated: int = 0):
+    notice = "プレビューを作成しました。内容を確認してから「Shopifyへ反映」を押してください。" if generated else None
+    return _shopify_calendar_page(request, notice=notice)
+
+
+@app.post("/shopify-calendar/preview")
+async def shopify_calendar_preview(request: Request):
+    form = await _read_form(request)
+    try:
+        closed = _shopify_calendar_closed(form)
+        plan = shopify_calendar.build_plan(date.today(), closed)
+        await run_in_threadpool(shopify_calendar.generate_images, plan)
+    except ClosedDaysError as exc:
+        return _shopify_calendar_page(request, form=form, error=str(exc), status_code=400)
+    except OSError as exc:
+        return _shopify_calendar_page(
+            request,
+            form=form,
+            error=f"画像を保存できませんでした（{exc}）。保存先フォルダの同期状態を確認してください。",
+            status_code=500,
+        )
+    return RedirectResponse(url="/shopify-calendar?generated=1", status_code=303)
+
+
+@app.get("/shopify-calendar/image/{key}.jpg")
+def shopify_calendar_image(key: str):
+    if not re.fullmatch(r"\d{4}_\d{2}", key):
+        return PlainTextResponse("不正な指定です。", status_code=400)
+    path = shopify_calendar.calendar_dir() / f"{key}.jpg"
+    if not path.is_file():
+        return PlainTextResponse("画像がありません。", status_code=404)
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/shopify-calendar/status", response_class=HTMLResponse)
+def shopify_calendar_status(request: Request):
+    status = shopify_calendar.read_status()
+    return templates.TemplateResponse(
+        "_shopify_calendar_status.html",
+        {
+            "request": request,
+            "status": status,
+            "current_filename": shopify_calendar.CURRENT_FILENAME,
+            "next_filename": shopify_calendar.NEXT_FILENAME,
+            "describe_updated_at": shopify_calendar.describe_updated_at,
+        },
+    )
+
+
+@app.post("/shopify-calendar/publish/start")
+async def shopify_calendar_publish_start(request: Request):
+    form = await _read_form(request)
+    expected = ",".join(target.key for target in current_and_next(date.today()))
+    if form.get("months") != expected:
+        # プレビュー作成後に月が替わった（例: 月末にプレビュー → 1日に反映）
+        return PlainTextResponse(
+            "プレビュー作成後に月が替わりました。ページを再読込し、プレビューを作り直してから反映してください。",
+            status_code=409,
+        )
+    try:
+        closed = _shopify_calendar_closed(form)
+    except ClosedDaysError as exc:
+        return PlainTextResponse(str(exc), status_code=400)
+    plan = shopify_calendar.build_plan(date.today(), closed)
+    step_keys = ("generate", "upload_current", "upload_next", "verify")
+
+    def worker(job_id: str) -> None:
+        def on_step(key: str, status: str, detail: str | None) -> None:
+            progress_jobs.update_step(job_id, key, status=status, detail=detail)
+
+        try:
+            result = shopify_calendar.publish(
+                plan,
+                step=on_step,
+                cancel_check=lambda: progress_jobs.is_cancel_requested(job_id),
+            )
+        except Exception:
+            snapshot = progress_jobs.snapshot(job_id) or {}
+            unfinished = tuple(
+                s["key"]
+                for s in snapshot.get("steps", [])
+                if s.get("status") not in {"completed"} and s.get("key") in step_keys
+            )
+            _mark_steps_failed(job_id, unfinished or step_keys)
+            raise
+        months = "・".join(label for _, label, _ in result.uploaded)
+        progress_jobs.finish(
+            job_id,
+            message=(
+                f"{months}のカレンダーを Shopify に反映しました。"
+                + (f"（注意 {len(result.warnings)} 件）" if result.warnings else "")
+            ),
+            result={
+                "uploaded": [
+                    {"filename": name, "month": label, "url": url}
+                    for name, label, url in result.uploaded
+                ],
+                "storefront": result.storefront,
+                "theme_setup_done": result.theme.setup_done if result.theme else None,
+                "warnings": result.warnings,
+            },
+        )
+
+    job_id = progress_jobs.start(
+        title="Shopifyカレンダー反映",
+        steps=[
+            ("generate", "カレンダー画像の作成・保存"),
+            ("upload_current", f"今月分を {shopify_calendar.CURRENT_FILENAME} に差し替え"),
+            ("upload_next", f"来月分を {shopify_calendar.NEXT_FILENAME} に差し替え"),
+            ("verify", "テーマ・ストア表示の確認"),
+        ],
+        worker=worker,
+        workflow="shopify_calendar",
+        metadata={key: ",".join(map(str, days)) for key, days in closed.items()},
+    )
+    return {"job_id": job_id}
 
 
 def _log_relpath(raw: str | None) -> str | None:

@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block title %}Shopifyカレンダー - くりまポータルツール{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1 class="page-title">Shopifyカレンダー</h1>
+  <svg class="page-wave" width="62" height="8" viewBox="0 0 62 8" fill="none"><path d="M2 5C8 1.5 13 1.5 19 5s11 3.5 17 0 11-3.5 17 0 5 1 5 1" stroke="#3bb0d4" stroke-width="2" stroke-linecap="round"/></svg>
+  <p class="page-lead">ストア（shop.kurima.co.jp）の営業日カレンダーを今月・来月の2枚に更新します。土日・祝日は自動で入ります。お盆・年末年始などの臨時休業日だけ入力してください。</p>
+</div>
+
+{% if error %}
+  <div class="note error">
+    <div class="note-title">入力を確認してください</div>
+    <p>{{ error }}</p>
+  </div>
+{% endif %}
+{% if notice %}
+  <div class="note ok">
+    <p>{{ notice }}</p>
+  </div>
+{% endif %}
+
+<section class="panel{% if error or notice %} mt-14{% endif %}">
+  <h2 class="panel-title">1. 臨時休業日を入れてプレビューを作る</h2>
+  <p class="panel-lead">「13-16」（連続）や「13,15」（個別）の形で入力します。休業日が無ければ空欄のままで大丈夫です。</p>
+  <form method="post" action="/shopify-calendar/preview">
+    <div class="cal-inputs">
+      {% for m in months %}
+        <div class="cal-input">
+          <div class="cal-input-head">
+            <span class="cal-input-title">{{ m.label }}</span>
+            <span class="tag-auto">{{ "今月" if loop.first else "来月" }}</span>
+          </div>
+          <label class="field">
+            <span class="field-label">臨時休業日（{{ m.label }}）</span>
+            <input class="input" type="text" name="closed_{{ m.key }}" value="{{ m.closed }}" placeholder="例: 13-16" autocomplete="off">
+          </label>
+          {% if m.reminder %}
+            <p class="cal-reminder">{{ m.reminder }}</p>
+          {% endif %}
+          <p class="cal-holidays">
+            祝日（自動）:
+            {% if m.holidays %}
+              {% for day, name in m.holidays %}{{ day }}日 {{ name }}{% if not loop.last %}、{% endif %}{% endfor %}
+            {% else %}
+              なし
+            {% endif %}
+          </p>
+        </div>
+      {% endfor %}
+    </div>
+    <div class="cta-wrap">
+      <button class="btn-cta" type="submit">プレビューを作成</button>
+      <span class="run-note">画像は {{ folder }} に保存されます</span>
+    </div>
+  </form>
+</section>
+
+<section class="panel mt-14">
+  <h2 class="panel-title">2. プレビューを確認して Shopify へ反映する</h2>
+  {% set ready = months | selectattr("image_exists") | list | length == months | length %}
+  <div class="cal-previews">
+    {% for m in months %}
+      <figure class="cal-preview">
+        {% if m.image_exists %}
+          <img src="/shopify-calendar/image/{{ m.key }}.jpg?v={{ m.image_version }}" alt="{{ m.label }}のカレンダー" width="250" height="250">
+          <figcaption>
+            {{ m.label }} → <span class="mono">{{ m.filename }}</span><br>
+            臨時休業日: {{ m.saved_closed or "なし" }} ／ 作成 {{ m.image_updated }}
+          </figcaption>
+        {% else %}
+          <div class="cal-preview-empty">{{ m.label }}のプレビューはまだありません</div>
+        {% endif %}
+      </figure>
+    {% endfor %}
+  </div>
+
+  {% if ready %}
+    <form method="post" action="/shopify-calendar/publish/start" data-progress-form data-progress-endpoint="/shopify-calendar/publish/start">
+      <input type="hidden" name="months" value="{{ months | map(attribute='key') | join(',') }}">
+      {% for m in months %}
+        <input type="hidden" name="closed_{{ m.key }}" value="{{ m.saved_closed }}">
+      {% endfor %}
+      <div class="cta-wrap">
+        <button class="btn-cta" type="submit">この内容で Shopify へ反映</button>
+        <span class="run-note">反映されるのは上のプレビューと同じ内容です／所要 約1分</span>
+      </div>
+    </form>
+  {% else %}
+    <p class="panel-lead">先に「1. プレビューを作成」を押してください。</p>
+  {% endif %}
+</section>
+
+<div id="progress-panel" class="progress-panel mt-14" hidden>
+  <div class="progress-head">
+    <div>
+      <h2 id="progress-title">処理状況</h2>
+      <p id="progress-message" class="progress-message">開始待ちです。</p>
+    </div>
+    <div class="progress-head-actions">
+      <span id="progress-status" class="badge">待機中</span>
+      <button type="button" id="progress-cancel" class="btn-stop" hidden>実行を中止</button>
+    </div>
+  </div>
+  <ol id="progress-steps" class="progress-steps"></ol>
+  <p id="progress-error" class="progress-error" hidden></p>
+  <p id="progress-hint" class="progress-hint" hidden></p>
+</div>
+
+<section class="panel mt-14">
+  <h2 class="panel-title">Shopify の状態</h2>
+  <div class="lazy-slot" data-lazy="/shopify-calendar/status">
+    <span class="lazy-spinner" aria-hidden="true"></span>Shopify に問い合わせ中…
+  </div>
+</section>
+
+<details class="panel mt-14">
+  <summary class="panel-title">初回設定（テーマの付け替え・1回だけ）</summary>
+  <p class="panel-lead">このページで1回反映して <span class="mono">{{ current_filename }}</span> と <span class="mono">{{ next_filename }}</span> を Shopify に作ったあと、テーマエディタで次の4か所を付け替えます。以後は付け替え不要です。</p>
+  <ol class="cal-steps">
+    <li>Shopify 管理画面 → オンラインストア → テーマ → 公開中テーマの「カスタマイズ」</li>
+    <li>サイドバー（PCで表示）の「営業日カレンダー」ブロック1つ目の画像 → <span class="mono">{{ current_filename }}</span></li>
+    <li>サイドバーのカレンダーブロック2つ目（休業日の案内文つき）の画像 → <span class="mono">{{ next_filename }}</span></li>
+    <li>トップページの「営業日カレンダー」セクション（SPのみ表示）の画像1つ目 → <span class="mono">{{ current_filename }}</span>、2つ目 → <span class="mono">{{ next_filename }}</span></li>
+    <li>同じセクションの画像2つの「幅」をどちらも <b>100%</b> にそろえる（SPで2枚とも画面幅いっぱいに表示されます）</li>
+    <li>保存 → PC とスマホでストアを開き、今月・来月が表示されることを確認</li>
+  </ol>
+  <p class="panel-lead">設定が終わると、上の「Shopify の状態」に「テーマ設定: 完了」と表示されます（read_themes 権限がある場合）。</p>
+</details>
+
+<script>
+// 進捗表示は共通スクリプト（/static/progress.js）が担当。ページ固有設定のみ渡す。
+window.KURIMA_PROGRESS = {
+  workflows: ["shopify_calendar"],
+  startTitle: "Shopifyカレンダー反映",
+  completeRedirect: "reload",
+  completeMessage: "反映しました。Shopify の状態を読み込みます…",
+};
+</script>
+{% endblock %}
