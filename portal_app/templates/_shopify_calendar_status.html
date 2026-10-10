@@ -1,0 +1,56 @@
+{% if not status.configured %}
+  <div class="note warn">
+    <div class="note-title">Shopify の接続設定がありません</div>
+    <p>共有 <span class="mono">.env</span>（kurimaportal-app）に SHOPIFY_CLIENT_ID / SHOPIFY_CLIENT_SECRET を設定してサーバーを再起動してください。プレビューの作成は設定なしでも使えます。</p>
+  </div>
+{% elif status.error %}
+  <div class="note error">
+    <div class="note-title">Shopify に接続できませんでした</div>
+    <p>{{ status.error }}</p>
+  </div>
+{% else %}
+  {% if not status.can_write_files %}
+    <div class="note error">
+      <div class="note-title">write_files 権限がありません</div>
+      <p>このままでは反映できません。Dev Dashboard でアプリに write_files を追加し、ストアで承認してください。</p>
+    </div>
+  {% endif %}
+  <dl class="kv">
+    {% for name in [current_filename, next_filename] %}
+      {% set f = status.files.get(name) %}
+      <dt class="mono">{{ name }}</dt>
+      <dd>
+        {% if f %}
+          {% if f.status == "READY" %}<span class="tag-ok">公開中</span>{% else %}<span class="tag-need">{{ f.status }}</span>{% endif %}
+          {{ f.alt or "" }}（更新 {{ describe_updated_at(f.updated_at) }}）
+          {% if f.url %}<a class="file-link" href="{{ f.url }}" target="_blank" rel="noopener">画像を開く</a>{% endif %}
+        {% else %}
+          <span class="tag-need">未作成</span> まだ Shopify にありません（初回の反映で作成されます）
+        {% endif %}
+      </dd>
+    {% endfor %}
+    <dt>テーマ設定</dt>
+    <dd>
+      {% if status.theme %}
+        {% if status.theme.setup_done and not status.theme.width_mismatch %}
+          <span class="tag-ok">完了</span>
+        {% else %}
+          <span class="tag-need">要確認</span>
+        {% endif %}
+        今月 {{ status.theme.current_refs | length }} か所・来月 {{ status.theme.next_refs | length }} か所が参照中（{{ status.theme.theme_name }}）
+        {% if status.theme.month_refs %}
+          <br>月名ファイルのまま: {{ status.theme.month_refs | join("、") }} → 下の「初回設定」で付け替えてください
+        {% endif %}
+        {% if status.theme.width_mismatch %}
+          <br>画像の幅がそろっていません: {{ status.theme.width_mismatch | join("、") }}
+        {% endif %}
+      {% else %}
+        {{ status.theme_error or "確認していません" }}
+      {% endif %}
+    </dd>
+    <dt>権限</dt>
+    <dd class="mono">{{ status.scopes | join(", ") }}</dd>
+    <dt>管理画面</dt>
+    <dd><a class="file-link" href="{{ status.admin_url }}/content/files" target="_blank" rel="noopener">コンテンツ &gt; ファイル</a>／<a class="file-link" href="{{ status.admin_url }}/themes" target="_blank" rel="noopener">テーマ</a></dd>
+  </dl>
+{% endif %}

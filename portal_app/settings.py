@@ -218,6 +218,16 @@ SETTINGS_CATALOG: tuple[tuple[str, tuple[tuple[str, str, bool], ...]], ...] = (
         ),
     ),
     (
+        "Shopifyカレンダー",
+        (
+            ("SHOPIFY_SHOP", "ストアID（既定 kurima-okinawa）", False),
+            ("SHOPIFY_CLIENT_ID", "Dev Dashboard アプリのクライアントID", True),
+            ("SHOPIFY_CLIENT_SECRET", "Dev Dashboard アプリのシークレット", True),
+            ("KURIMA_SHOPIFY_CALENDAR_DIR", "生成画像の保存先上書き（既定 ポータル同期フォルダ/Shopifyカレンダー）", False),
+            ("KURIMA_SHOPIFY_STOREFRONT_URL", "反映確認で開くストアURL（既定 https://shop.kurima.co.jp/）", False),
+        ),
+    ),
+    (
         "ブラウザ実体（Playwright）",
         (
             ("PLAYWRIGHT_CHROMIUM_EXECUTABLE", "使用ブラウザ実行ファイルの固定", False),

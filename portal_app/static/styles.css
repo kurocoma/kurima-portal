@@ -1617,3 +1617,82 @@ button {
 .appfoot-sep {
   color: var(--muted-4);
 }
+
+/* ---------- Shopifyカレンダー ---------- */
+.cal-inputs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.cal-input {
+  border: 1px solid #e6e0d6;
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+
+.cal-input-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.cal-input-title {
+  font-weight: 700;
+}
+
+.cal-reminder {
+  margin: 8px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #b4532a;
+}
+
+.cal-holidays {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--muted-2);
+}
+
+.cal-previews {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin-top: 10px;
+}
+
+.cal-preview {
+  margin: 0;
+}
+
+.cal-preview img {
+  display: block;
+  width: 250px;
+  height: 250px;
+  border: 1px solid #e6e0d6;
+}
+
+.cal-preview figcaption {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted-2);
+}
+
+.cal-preview-empty {
+  display: grid;
+  place-items: center;
+  width: 250px;
+  height: 250px;
+  border: 1px dashed #d9d3c8;
+  font-size: 12px;
+  color: var(--muted-3);
+}
+
+.cal-steps {
+  margin: 10px 0 0;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.9;
+}

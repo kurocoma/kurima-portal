@@ -33,6 +33,8 @@ OPTIONAL_ENV_KEYS = (
     ("YAMATO_B2_PASSWORD", "ヤマトB2取込"),
     ("CLICKPOST_YAHOO_LOGIN_ID", "クリックポスト取込・決済"),
     ("CLICKPOST_YAHOO_PASSWORD", "クリックポスト取込・決済"),
+    ("SHOPIFY_CLIENT_ID", "Shopifyカレンダー反映"),
+    ("SHOPIFY_CLIENT_SECRET", "Shopifyカレンダー反映"),
 )
 
 SYSTEM_BROWSER_CANDIDATES = (
