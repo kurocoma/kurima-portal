@@ -1826,6 +1826,7 @@ def _load_tracking_maps(
                 maps["letterpack"].setdefault(denpyo_no, tracking_no)
 
     # 2. しまのや出荷データ（最新1ファイルのみ。2列CSV「お客様管理番号,伝票番号」にも対応）
+    #    お客様管理番号 = 店舗記号(r/a/y) + 受注番号末尾7桁。記号を除いた7桁をキーにする。
     shimanoya_dir = portal_root / "しまのやさん" / "csv格納" / "出荷データ"
     latest_shimanoya = _latest_file(shimanoya_dir)
     if latest_shimanoya is not None:
@@ -1996,8 +1997,14 @@ def normalize_barcode_value(value: str) -> str:
 _normalize_denpyo_no = normalize_barcode_value
 
 
+# しまのや出荷データ「お客様管理番号」の店舗記号。しまのやCSV作成ツールが受注番号末尾7桁の
+# 先頭に付与する（r=楽天, a=Amazon, y=Yahoo。y は 2026-09-10 の Yahoo 受注対応で追加）。
+_SHIMANOYA_STORE_PREFIX_TABLE = str.maketrans("", "", "aArRyY")
+
+
 def _normalize_shimanoya_order_suffix(value: str) -> str:
-    return str(value or "").strip().replace("a", "").replace("r", "").replace("R", "")
+    """店舗記号を除いた7桁を返す（購入者データ.受注番号の末尾7桁と突合するキー）。"""
+    return str(value or "").strip().translate(_SHIMANOYA_STORE_PREFIX_TABLE)
 
 
 def _normalize_person_name(value: str) -> str:
